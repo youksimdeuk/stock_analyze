@@ -981,7 +981,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.3,
-            max_tokens=2500
+            max_completion_tokens=2500
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -1090,7 +1090,7 @@ def write_news_data(ws, news_items, investment_points):
 
     if rows:
         ws.batch_clear(['A2:E2000'])
-        ws.update(f'A2:E{1 + len(rows)}', rows, value_input_option='USER_ENTERED')
+        ws.update(values=rows, range_name=f'A2:E{1 + len(rows)}', value_input_option='USER_ENTERED')
         apply_news_sheet_format(ws, len(rows))
 
 def write_industry_analysis(ws, analysis, source_links):
@@ -1107,7 +1107,7 @@ def write_industry_analysis(ws, analysis, source_links):
         link = source_links[i] if i < len(source_links) else ''
         rows.append([section, content, to_hyperlink_formula(link, '근거링크') if link else '[자료 없음]'])
     ws.batch_clear(['A3:C100'])
-    ws.update('A3:C14', rows, value_input_option='USER_ENTERED')
+    ws.update(values=rows, range_name='A3:C14', value_input_option='USER_ENTERED')
     apply_batch_format(ws, [{
         'repeatCell': {
             'range': {'sheetId': ws.id, 'startRowIndex': 2, 'endRowIndex': 14, 'startColumnIndex': 0, 'endColumnIndex': 3},
@@ -1146,7 +1146,7 @@ def write_competition_data(ws, competition, company_name):
         ])
 
     ws.batch_clear(['A2:M2000'])
-    ws.update(f'A2:M{1 + len(rows)}', rows, value_input_option='USER_ENTERED')
+    ws.update(values=rows, range_name=f'A2:M{1 + len(rows)}', value_input_option='USER_ENTERED')
     apply_competition_sheet_format(ws, len(rows))
 
 # =====================================================

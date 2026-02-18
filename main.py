@@ -230,7 +230,7 @@ def get_annual_report_text(corp_code, max_chars=8000):
                 clean = re.sub(r'&[a-zA-Z#0-9]+;', ' ', clean)
                 clean = re.sub(r'\s+', ' ', clean).strip()
                 if len(clean) > 300:
-                    texts.append(clean[:3000])
+                    texts.append(clean[:5000])
             except Exception:
                 continue
 

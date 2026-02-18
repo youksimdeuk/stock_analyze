@@ -1193,6 +1193,7 @@ def run_analysis(spreadsheet):
         f"- {d.get('rcept_dt','')} [{d.get('report_nm','')}]"
         for d in disclosures
     ])
+    disclosure_links = build_disclosure_links(disclosures)
     print(f"  ✅ 공시 {len(disclosures)}건 수집")
 
     print("  사업보고서 원문 다운로드 중... (시간이 걸릴 수 있음)")
@@ -1206,7 +1207,9 @@ def run_analysis(spreadsheet):
         report_text=report_text, disclosure_titles=disclosure_titles
     )
     ws_industry = spreadsheet.worksheet('산업 이해 및 기업 상황')
-    write_industry_analysis(ws_industry, company_name, analysis)
+    source_links = [item.get('link') or item.get('originallink') for item in news_items[:12]]
+    source_links = [x for x in source_links if x] + disclosure_links[:12]
+    write_industry_analysis(ws_industry, analysis, source_links)
     print("  ✅ 산업 이해 및 기업 상황 시트 입력 완료")
 
     # ===== 경쟁 분석 =====
@@ -1216,7 +1219,7 @@ def run_analysis(spreadsheet):
         report_text=report_text, disclosure_titles=disclosure_titles
     )
     ws_competition = spreadsheet.worksheet('경쟁현황')
-    write_competition_data(ws_competition, competition)
+    write_competition_data(ws_competition, competition, company_name)
     print("  ✅ 경쟁현황 시트 입력 완료")
 
     # ===== 현재가 구하기 시트 =====

@@ -2,7 +2,7 @@
 기업분석 자동화 스크립트
 - DART API: 재무 데이터 수집
 - 네이버 뉴스 API: 뉴스 수집
-- OpenAI GPT-5-nano: 내용 분석 및 요약
+- OpenAI GPT-5-mini: 내용 분석 및 요약
 - Google Sheets API: 스프레드시트 자동 입력
 """
 
@@ -1020,7 +1020,6 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.3,
             max_completion_tokens=3000
         )
         return json.loads(response.choices[0].message.content)
@@ -1105,7 +1104,6 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.3,
             max_completion_tokens=2500
         )
         return json.loads(response.choices[0].message.content)
@@ -1138,7 +1136,6 @@ def generate_news_investment_points(news_items, company_name):
             model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.7,
             max_completion_tokens=1500
         )
         result = json.loads(response.choices[0].message.content)

@@ -896,6 +896,45 @@ def to_hyperlink_formula(url, label='원문보기'):
     return f'=HYPERLINK("{safe_url}", "{safe_label}")'
 
 
+def extract_urls(value):
+    urls = []
+    if isinstance(value, list):
+        candidates = [str(x).strip() for x in value if str(x).strip()]
+    else:
+        text = str(value or '').strip()
+        if not text:
+            return []
+        candidates = [line.strip() for line in text.splitlines() if line.strip()]
+
+    for line in candidates:
+        found = re.findall(r'https?://[^\s,\)\]]+', line)
+        if found:
+            urls.extend(found)
+        elif line.startswith('http://') or line.startswith('https://'):
+            urls.append(line)
+
+    dedup = []
+    seen = set()
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        dedup.append(u)
+    return dedup
+
+
+def to_multiline_hyperlink_formula(value, label_prefix='원문'):
+    urls = extract_urls(value)
+    if not urls:
+        return '[원문 링크 없음]'
+    parts = []
+    for i, url in enumerate(urls, start=1):
+        safe_url = str(url).replace('"', '""')
+        safe_label = f"{label_prefix}{i}".replace('"', '""')
+        parts.append(f'HYPERLINK("{safe_url}", "{safe_label}")')
+    return "=" + "&CHAR(10)&".join(parts)
+
+
 def fmt_eok(value):
     if value is None:
         return '[자료 없음]'
@@ -1304,7 +1343,7 @@ def write_news_data(ws, news_items, investment_points):
         link = item.get('originallink') or item.get('link') or item.get('url') or ''
         point = investment_points[i] if i < len(investment_points) else ''
         summary = f"{title}\n{desc}".strip()
-        rows.append([pub_date, summary, link if link else '[원문 링크 없음]', point or '[자료 없음]', ''])
+        rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크') if link else '[원문 링크 없음]', point or '[자료 없음]', ''])
 
     if rows:
         ws.batch_clear(['A2:E2000'])
@@ -1358,7 +1397,7 @@ def write_competition_data(ws, competition, company_name):
             c.get('약점/리스크') or '[자료 없음]',
             c.get('CAPEX/증설') or '[자료 없음]',
             to_multiline_numbered(c.get('최근3년 기업활동 뉴스')),
-            to_multiline_numbered(c.get('뉴스 원본 링크')),
+            to_multiline_hyperlink_formula(c.get('뉴스 원본 링크'), '원문'),
             c.get('투자 고민 포인트') or '[자료 없음]',
             c.get('비고') or '[자료 없음]',
         ])

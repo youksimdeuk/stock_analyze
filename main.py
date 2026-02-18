@@ -153,17 +153,23 @@ def validate_runtime_config():
 def get_dart_disclosures(corp_code, count=20):
     """최근 공시 목록 조회"""
     url = "https://opendart.fss.or.kr/api/list.json"
+    now = datetime.now()
     params = {
         'crtfc_key': DART_API_KEY,
         'corp_code': corp_code,
+        'bgn_de': f"{now.year - 5}0101",
+        'end_de': now.strftime('%Y%m%d'),
         'page_no': '1',
         'page_count': str(count),
+        'sort': 'date',
+        'sort_mth': 'desc',
     }
     try:
         r = requests.get(url, params=params, timeout=15)
         data = r.json()
         if data.get('status') == '000':
             return data.get('list', [])
+        print(f"  [경고] 공시 조회 실패: status={data.get('status')} message={data.get('message')}")
     except Exception:
         pass
     return []
@@ -447,19 +453,49 @@ def write_price_sheet(ws, bs, issued, treasury, float_shares):
     if updates:
         ws.batch_update(updates)
 
-def find_amount(fin_list, keywords, sj_div=None):
+def parse_dart_int(value):
+    text = str(value or '').strip()
+    if not text or text in {'-', '--', 'N/A'}:
+        return None
+    text = text.replace(',', '')
+    if text.startswith('(') and text.endswith(')'):
+        text = f"-{text[1:-1]}"
+    try:
+        return int(float(text))
+    except Exception:
+        return None
+
+
+def normalize_account_id(value):
+    return (value or '').lower().replace('-', '').replace('_', '').replace(' ', '')
+
+
+def find_amount(fin_list, keywords, sj_div=None, account_ids=None):
     """재무제표 항목에서 키워드로 금액 추출"""
+    target_ids = {normalize_account_id(x) for x in (account_ids or [])}
+    normalized_keywords = [(kw or '').replace(' ', '') for kw in keywords]
+
+    allowed_sj = None
+    if sj_div:
+        allowed_sj = {sj_div.upper()}
+        if sj_div.upper() == 'IS':
+            allowed_sj.add('CIS')  # 포괄손익계산서 사용 기업 대응
+
     for item in fin_list:
-        if sj_div and item.get('sj_div') != sj_div:
+        item_sj = (item.get('sj_div') or '').upper()
+        if allowed_sj and item_sj not in allowed_sj:
             continue
-        account_nm = item.get('account_nm', '')
-        for kw in keywords:
-            if kw in account_nm:
-                val = (item.get('thstrm_amount') or '0').replace(',', '').strip()
-                try:
-                    return int(val)
-                except:
-                    return None
+        account_nm = (item.get('account_nm') or '').replace(' ', '')
+        account_id = normalize_account_id(item.get('account_id'))
+        if target_ids and account_id in target_ids:
+            val = parse_dart_int(item.get('thstrm_amount'))
+            if val is not None:
+                return val
+        for kw in normalized_keywords:
+            if kw and kw in account_nm:
+                val = parse_dart_int(item.get('thstrm_amount'))
+                if val is not None:
+                    return val
     return None
 
 def parse_metrics(fin_list):
@@ -467,17 +503,22 @@ def parse_metrics(fin_list):
     m = {}
 
     m['매출액'] = find_amount(fin_list,
-        ['매출액', '수익(매출액)', '영업수익', '매출'], 'IS')
+        ['매출액', '수익(매출액)', '영업수익', '매출'], 'IS',
+        account_ids=['ifrsfullrevenue', 'ifrsrevenue', 'ifrsfullrevenuefromcontractswithcustomers'])
     m['매출원가'] = find_amount(fin_list,
-        ['매출원가', '영업비용'], 'IS')
+        ['매출원가', '영업비용'], 'IS',
+        account_ids=['ifrsfullcostofsales', 'ifrscostofsales'])
     m['판관비'] = find_amount(fin_list,
         ['판매비와관리비', '판매비 및 관리비', '판관비'], 'IS')
     m['영업이익'] = find_amount(fin_list,
-        ['영업이익', '영업손익', '영업이익(손실)'], 'IS')
+        ['영업이익', '영업손익', '영업이익(손실)'], 'IS',
+        account_ids=['dartoperatingincomeloss', 'ifrsfullprofitlossfromoperatingactivities'])
     m['당기순이익'] = find_amount(fin_list,
-        ['당기순이익', '당기순손익', '분기순이익', '당기순이익(손실)'], 'IS')
+        ['당기순이익', '당기순손익', '분기순이익', '당기순이익(손실)'], 'IS',
+        account_ids=['ifrsfullprofitloss', 'ifrsprofitloss'])
     m['자본총계'] = find_amount(fin_list,
-        ['자본총계'], 'BS')
+        ['자본총계'], 'BS',
+        account_ids=['ifrsfullequity', 'ifrsequity'])
 
     capex = find_amount(fin_list,
         ['유형자산의 취득', '유형자산취득', '유형자산의취득'], 'CF')
@@ -485,15 +526,16 @@ def parse_metrics(fin_list):
 
     m['영업활동현금흐름'] = find_amount(fin_list,
         ['영업활동으로 인한 현금흐름', '영업활동현금흐름',
-         '영업활동으로인한현금흐름', '영업활동으로 인한현금흐름'], 'CF')
+         '영업활동으로인한현금흐름', '영업활동으로 인한현금흐름'], 'CF',
+        account_ids=['ifrsfullcashflowsfromusedinoperatingactivities', 'ifrscashflowsfromusedinoperatingactivities'])
 
     # 계산 지표
-    if m.get('매출액') and m.get('영업이익') is not None:
+    if m.get('매출액') is not None and m.get('매출액') != 0 and m.get('영업이익') is not None:
         m['영업이익률'] = m['영업이익'] / m['매출액']
     else:
         m['영업이익률'] = None
 
-    if m.get('자본총계') and m.get('당기순이익') is not None:
+    if m.get('자본총계') is not None and m.get('자본총계') != 0 and m.get('당기순이익') is not None:
         m['ROE'] = m['당기순이익'] / m['자본총계']
     else:
         m['ROE'] = None
@@ -1152,12 +1194,16 @@ def run_analysis(spreadsheet):
         if fin_list:
             metrics = parse_metrics(fin_list)
             write_annual_data(ws_stock, year, metrics)
-            rev = metrics.get('매출액', 0) or 0
-            op = metrics.get('영업이익', 0) or 0
-            financial_summary_parts.append(
-                f"{year}년: 매출 {rev/1e8:.0f}억원, 영업이익 {op/1e8:.0f}억원"
-            )
-            print(f"✅ 매출: {rev/1e8:.0f}억")
+            rev = metrics.get('매출액')
+            op = metrics.get('영업이익')
+            if rev is not None and op is not None:
+                financial_summary_parts.append(
+                    f"{year}년: 매출 {rev/1e8:.0f}억원, 영업이익 {op/1e8:.0f}억원"
+                )
+            if rev is None:
+                print("⚠️ 매출 추출 실패")
+            else:
+                print(f"✅ 매출: {rev/1e8:.0f}억")
         else:
             print("데이터 없음")
         time.sleep(0.5)

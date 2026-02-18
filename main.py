@@ -800,6 +800,51 @@ def to_hyperlink_formula(url, label='원문보기'):
     return f'=HYPERLINK("{safe_url}", "{safe_label}")'
 
 
+def fmt_eok(value):
+    if value is None:
+        return '[자료 없음]'
+    return f"{value/1e8:.1f}억원"
+
+
+def fmt_pct(value):
+    if value is None:
+        return '[자료 없음]'
+    return f"{value*100:.2f}%"
+
+
+def build_financial_context_text(annual_metrics_by_year, quarterly_by_year):
+    lines = []
+    if annual_metrics_by_year:
+        lines.append("연간 지표:")
+        for year, m in annual_metrics_by_year:
+            lines.append(
+                f"- {year}: 매출 {fmt_eok(m.get('매출액'))}, 매출원가 {fmt_eok(m.get('매출원가'))}, "
+                f"영업이익 {fmt_eok(m.get('영업이익'))}, 당기순이익 {fmt_eok(m.get('당기순이익'))}, "
+                f"OPM {fmt_pct(m.get('영업이익률'))}, OCF {fmt_eok(m.get('영업활동현금흐름'))}, "
+                f"CAPEX {fmt_eok(m.get('CAPEX'))}, ROE {fmt_pct(m.get('ROE'))}"
+            )
+
+    if quarterly_by_year:
+        lines.append("분기 지표:")
+        for year in sorted(quarterly_by_year.keys()):
+            qset = quarterly_by_year.get(year) or {}
+            q_lines = []
+            for q in [1, 2, 3, 4]:
+                m = qset.get(q, {})
+                if not m:
+                    continue
+                rev = m.get('매출액')
+                op = m.get('영업이익')
+                if rev is None and op is None:
+                    continue
+                q_lines.append(
+                    f"Q{q} 매출 {fmt_eok(rev)}, 영업이익 {fmt_eok(op)}, OPM {fmt_pct(m.get('영업이익률'))}"
+                )
+            if q_lines:
+                lines.append(f"- {year}: " + " | ".join(q_lines))
+    return "\n".join(lines)
+
+
 def to_multiline_numbered(values):
     if isinstance(values, list):
         cleaned = [str(v).strip() for v in values if str(v).strip()]
@@ -902,12 +947,16 @@ def filter_stock_price_news(news_items):
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-def generate_industry_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles=''):
+def generate_industry_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', financial_detail=''):
     """산업 이해 및 기업 상황 시트 내용 생성"""
-    news_text = "\n".join([
-        f"- [{clean_html(item.get('title',''))}] {clean_html(item.get('description',''))}"
-        for item in news_items[:40]
-    ])
+    news_lines = []
+    for item in news_items[:50]:
+        title = clean_html(item.get('title', ''))
+        desc = clean_html(item.get('description', ''))[:180]
+        link = item.get('link') or item.get('originallink') or ''
+        dt = item.get('pubDate', '')
+        news_lines.append(f"- ({dt}) [{title}] {desc} | 링크: {link if link else '[링크 없음]'}")
+    news_text = "\n".join(news_lines)
 
     prompt = f"""당신은 한국 주식 투자 리서치 전문가입니다.
 아래 제공된 실제 자료(DART 사업보고서, 공시, 뉴스, 재무데이터)만을 근거로 분석을 작성하세요.
@@ -925,11 +974,16 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 ■ DART 재무데이터 (실제 수치):
 {financial_summary if financial_summary else '[재무 데이터 없음]'}
 
+■ 재무 상세 요약:
+{financial_detail if financial_detail else '[재무 상세 없음]'}
+
 ■ 최근 뉴스:
 {news_text if news_text else '[뉴스 없음]'}
 
 위 자료만 근거로 아래 항목을 bullet point(•) 형식으로 작성하세요.
 자료 출처가 명확한 내용만 작성하고, 불확실한 내용은 "[추정]" 표시.
+각 항목은 최소 2개 이상 bullet을 작성하고, 가능하면 수치(매출/이익/비중/증감률/연도)를 포함하세요.
+모호한 일반론은 금지하고, 제공 자료 문구를 근거로 구체적으로 쓰세요.
 다음 형식을 반드시 지키세요:
 1) 주요 제품: "제품명 (매출액 OOO억원 / 전체 매출의 OO%)"
 2) 주요 원재료: "원재료명 (매입액 OOO억원 / 매출원가의 OO%)"
@@ -956,11 +1010,11 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-nano",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.3,
-            max_tokens=3000
+            max_completion_tokens=3000
         )
         return json.loads(response.choices[0].message.content)
     except Exception as e:
@@ -1147,10 +1201,10 @@ def write_news_data(ws, news_items, investment_points):
         pub_date = item.get('pubDate', '')
         title = clean_html(item.get('title', ''))
         desc = clean_html(item.get('description', ''))[:300]
-        link = item.get('originallink') or item.get('link') or item.get('link', '')
+        link = item.get('originallink') or item.get('link') or item.get('url') or ''
         point = investment_points[i] if i < len(investment_points) else ''
         summary = f"{title}\n{desc}".strip()
-        rows.append([pub_date, summary, to_hyperlink_formula(link), point or '[자료 없음]', ''])
+        rows.append([pub_date, summary, link if link else '[원문 링크 없음]', point or '[자료 없음]', ''])
 
     if rows:
         ws.batch_clear(['A2:E2000'])
@@ -1251,6 +1305,8 @@ def run_analysis(spreadsheet):
     ws_stock = spreadsheet.worksheet('주식분석 값 입력')
     current_year = datetime.now().year
     financial_summary_parts = []
+    annual_metrics_by_year = []
+    quarterly_by_year = {}
 
     for year in range(2020, current_year + 1):
         print(f"  {year}년 조회 중...", end=' ')
@@ -1258,6 +1314,7 @@ def run_analysis(spreadsheet):
         if fin_list:
             metrics = parse_metrics(fin_list)
             write_annual_data(ws_stock, year, metrics)
+            annual_metrics_by_year.append((year, metrics))
             rev = metrics.get('매출액')
             op = metrics.get('영업이익')
             if rev is not None and op is not None:
@@ -1279,14 +1336,15 @@ def run_analysis(spreadsheet):
     for year in range(2020, current_year + 1):
         print(f"  {year}년 분기 데이터 조회 중...")
         quarterly = get_quarterly_metrics(corp_code, year)
+        quarterly_by_year[year] = quarterly
         write_quarterly_data(ws_stock, year, quarterly)
         print(f"  ✅ {year}년 분기 완료")
         time.sleep(0.5)
 
     # ===== 뉴스 수집 =====
     print(f"\n[4/7] 뉴스 수집 중... ({company_name})")
-    news_items = get_naver_news(company_name, display=100)
-    print(f"  ✅ {len(news_items)}개 뉴스 수집")
+    news_items = collect_news_items(company_name, min_count=MIN_NEWS_COUNT)
+    print(f"  ✅ {len(news_items)}개 뉴스 수집 (국내+해외, 5년 이내)")
 
     # 투자 포인트 생성
     print("  투자 포인트 생성 중...")
@@ -1314,7 +1372,8 @@ def run_analysis(spreadsheet):
     print("\n[6/7] 산업 및 기업 분석 생성 중...")
     analysis = generate_industry_analysis(
         company_name, stock_code, news_items, financial_summary,
-        report_text=report_text, disclosure_titles=disclosure_titles
+        report_text=report_text, disclosure_titles=disclosure_titles,
+        financial_detail=build_financial_context_text(annual_metrics_by_year, quarterly_by_year)
     )
     ws_industry = spreadsheet.worksheet('산업 이해 및 기업 상황')
     source_links = [item.get('link') or item.get('originallink') for item in news_items[:12]]

@@ -2,6 +2,15 @@ name: Company Analysis Daily
 
 on:
   workflow_dispatch:
+    inputs:
+      target_spreadsheet_id:
+        description: "Google Spreadsheet ID (optional)"
+        required: false
+        default: ""
+      force_reanalyze:
+        description: "Ignore 뉴스수집!A2 check and force run (true/false)"
+        required: false
+        default: "false"
   schedule:
     # 00:00 KST = 15:00 UTC (previous day)
     - cron: "0 15 * * *"
@@ -23,6 +32,8 @@ jobs:
       GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
       GOOGLE_CREDENTIALS_PATH: credentials.json
       GOOGLE_TOKEN_PATH: token.json
+      TARGET_SPREADSHEET_ID: ${{ github.event.inputs.target_spreadsheet_id || vars.TARGET_SPREADSHEET_ID }}
+      FORCE_REANALYZE: ${{ github.event.inputs.force_reanalyze || vars.FORCE_REANALYZE }}
 
     steps:
       - name: Checkout

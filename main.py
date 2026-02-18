@@ -1195,6 +1195,14 @@ def parse_json_from_chat_response(response):
     return {}
 
 
+def _build_token_kwargs(model, n):
+    """모델별 토큰 파라미터 이름 결정"""
+    # gpt-5-mini 계열은 max_completion_tokens, 나머지는 max_tokens
+    if 'gpt-5' in model:
+        return {'max_completion_tokens': n}
+    return {'max_tokens': n}
+
+
 def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
     models = [OPENAI_MODEL_PRIMARY, OPENAI_MODEL_FALLBACK]
     last_err = None
@@ -1207,7 +1215,7 @@ def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
                     kwargs = {
                         'model': model,
                         'messages': [{"role": "user", "content": prompt}],
-                        'max_tokens': max_completion_tokens,
+                        **_build_token_kwargs(model, max_completion_tokens),
                     }
                     if use_json_format:
                         kwargs['response_format'] = {"type": "json_object"}

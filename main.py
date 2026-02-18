@@ -1163,7 +1163,7 @@ def filter_stock_price_news(news_items):
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=90.0, max_retries=2)
 OPENAI_MODEL_PRIMARY = 'gpt-5-mini'
-OPENAI_MODEL_FALLBACK = 'gpt-4o-mini'
+OPENAI_MODEL_FALLBACK = 'gpt-5-nano'
 
 
 def extract_message_text(message):

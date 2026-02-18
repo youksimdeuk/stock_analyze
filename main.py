@@ -1326,7 +1326,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 }}"""
 
     try:
-        return call_openai_json(prompt, max_completion_tokens=3000, task_label='산업분석')
+        return call_openai_json(prompt, max_completion_tokens=6000, task_label='산업분석')
     except Exception as e:
         print(f"  [오류] OpenAI 분석 생성 실패: {e}")
         return {}
@@ -1404,7 +1404,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 }}"""
 
     try:
-        return call_openai_json(prompt, max_completion_tokens=2500, task_label='경쟁분석')
+        return call_openai_json(prompt, max_completion_tokens=6000, task_label='경쟁분석')
     except Exception as e:
         print(f"  [오류] OpenAI 경쟁분석 생성 실패: {e}")
         return {}

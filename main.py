@@ -478,6 +478,97 @@ def normalize_account_id(value):
     return (value or '').lower().replace('-', '').replace('_', '').replace(' ', '')
 
 
+def normalize_account_name(value):
+    return re.sub(r'[^0-9A-Za-z가-힣]', '', str(value or '')).lower().strip()
+
+
+def pick_is_core_from_rows(fin_list):
+    """GAS 로직 기반 IS/CIS 핵심값 추출"""
+    out = {'rev': None, 'cogs': None, 'sga': None, 'op': None, 'ni': None}
+    selling = None
+    admin = None
+
+    revenue_ids = {
+        'ifrsfullrevenue', 'ifrsrevenue', 'ifrsfullrevenuefromcontractswithcustomers'
+    }
+    cogs_ids = {'ifrsfullcostofsales', 'ifrscostofsales'}
+    sga_ids = {
+        'darttotalsellinggeneraladministrativeexpenses',
+        'ifrsfullsellinggeneralandadministrativeexpense'
+    }
+    op_ids = {
+        'dartoperatingincomeloss',
+        'ifrsfulloperatingprofitloss',
+        'ifrsoperatingprofitloss',
+        'ifrsfullprofitlossfromoperatingactivities',
+    }
+    ni_ids = {
+        'ifrsfullprofitloss',
+        'ifrsprofitloss',
+        'ifrsfullprofitlossattributabletoownersofparent',
+    }
+
+    # 1) account_id 우선
+    for item in fin_list:
+        sj = (item.get('sj_div') or '').upper()
+        if sj not in {'IS', 'CIS'}:
+            continue
+        aid = normalize_account_id(item.get('account_id'))
+        val = pick_numeric_amount(item)
+        if val is None:
+            continue
+
+        if out['rev'] is None and aid in revenue_ids:
+            out['rev'] = val
+        if out['cogs'] is None and aid in cogs_ids:
+            out['cogs'] = val
+        if out['sga'] is None and aid in sga_ids:
+            out['sga'] = val
+        if out['op'] is None and aid in op_ids:
+            out['op'] = val
+        if out['ni'] is None and aid in ni_ids:
+            out['ni'] = val
+
+    # 2) account_nm 보조
+    for item in fin_list:
+        sj = (item.get('sj_div') or '').upper()
+        if sj not in {'IS', 'CIS'}:
+            continue
+        nm = normalize_account_name(item.get('account_nm'))
+        val = pick_numeric_amount(item)
+        if val is None:
+            continue
+
+        if out['rev'] is None:
+            if any(k in nm for k in ['매출액', '수익매출액', '영업수익', '고객과의계약']):
+                out['rev'] = val
+
+        if out['cogs'] is None:
+            # '영업비용'은 오인 가능성이 커서 제외
+            if '매출원가' in nm or ('원가' in nm and '판매' not in nm and '관리' not in nm):
+                out['cogs'] = val
+
+        if out['sga'] is None:
+            if any(k in nm for k in ['판매비와관리비', '판매비및관리비', '판관비']):
+                out['sga'] = val
+
+        if selling is None and '판매비' in nm:
+            selling = val
+        if admin is None and '관리비' in nm:
+            admin = val
+
+        if out['op'] is None and any(k in nm for k in ['영업이익', '영업손익', '영업손실']):
+            out['op'] = val
+
+        if out['ni'] is None and any(k in nm for k in ['당기순이익', '당기순손익', '지배기업소유주']):
+            out['ni'] = val
+
+    if out['sga'] is None and selling is not None and admin is not None:
+        out['sga'] = selling + admin
+
+    return out
+
+
 def find_amount(fin_list, keywords, sj_div=None, account_ids=None):
     """재무제표 항목에서 키워드로 금액 추출"""
     target_ids = {normalize_account_id(x) for x in (account_ids or [])}
@@ -509,21 +600,12 @@ def find_amount(fin_list, keywords, sj_div=None, account_ids=None):
 def parse_metrics(fin_list):
     """핵심 재무 지표 파싱"""
     m = {}
-
-    m['매출액'] = find_amount(fin_list,
-        ['매출액', '수익(매출액)', '영업수익', '매출'], 'IS',
-        account_ids=['ifrsfullrevenue', 'ifrsrevenue', 'ifrsfullrevenuefromcontractswithcustomers'])
-    m['매출원가'] = find_amount(fin_list,
-        ['매출원가', '영업비용'], 'IS',
-        account_ids=['ifrsfullcostofsales', 'ifrscostofsales'])
-    m['판관비'] = find_amount(fin_list,
-        ['판매비와관리비', '판매비 및 관리비', '판관비'], 'IS')
-    m['영업이익'] = find_amount(fin_list,
-        ['영업이익', '영업손익', '영업이익(손실)'], 'IS',
-        account_ids=['dartoperatingincomeloss', 'ifrsfullprofitlossfromoperatingactivities'])
-    m['당기순이익'] = find_amount(fin_list,
-        ['당기순이익', '당기순손익', '분기순이익', '당기순이익(손실)'], 'IS',
-        account_ids=['ifrsfullprofitloss', 'ifrsprofitloss'])
+    is_core = pick_is_core_from_rows(fin_list)
+    m['매출액'] = is_core.get('rev')
+    m['매출원가'] = is_core.get('cogs')
+    m['판관비'] = is_core.get('sga')
+    m['영업이익'] = is_core.get('op')
+    m['당기순이익'] = is_core.get('ni')
     m['자본총계'] = find_amount(fin_list,
         ['자본총계'], 'BS',
         account_ids=['ifrsfullequity', 'ifrsequity'])
@@ -553,7 +635,7 @@ def parse_metrics(fin_list):
 def calc_quarter(annual, prev_cum):
     """단일 분기값 계산: annual(누적) - prev_cum(직전 누적)"""
     if annual is None or prev_cum is None:
-        return annual
+        return None
     return annual - prev_cum
 
 
@@ -1314,9 +1396,10 @@ def run_analysis(spreadsheet):
 
     for year in range(2020, current_year + 1):
         print(f"  {year}년 조회 중...", end=' ')
-        fin_list, fs_div = get_financial_statements(corp_code, year, REPRT_CODES['FY'])
-        if fin_list:
-            metrics = parse_metrics(fin_list)
+        fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, year)
+        metrics = fetch_report_metrics(corp_code, year, REPRT_CODES['FY'], fs_div, sj_div)
+        has_any = any(metrics.get(k) is not None for k in ['매출액', '영업이익', '당기순이익', '매출원가', '판관비'])
+        if has_any:
             write_annual_data(ws_stock, year, metrics)
             annual_metrics_by_year.append((year, metrics))
             rev = metrics.get('매출액')

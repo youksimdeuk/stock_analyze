@@ -466,6 +466,14 @@ def parse_dart_int(value):
         return None
 
 
+def pick_numeric_amount(item):
+    """DART 누적금액(thstrm_add_amount) 우선, 없으면 thstrm_amount"""
+    v = parse_dart_int(item.get('thstrm_add_amount'))
+    if v is not None:
+        return v
+    return parse_dart_int(item.get('thstrm_amount'))
+
+
 def normalize_account_id(value):
     return (value or '').lower().replace('-', '').replace('_', '').replace(' ', '')
 
@@ -488,12 +496,12 @@ def find_amount(fin_list, keywords, sj_div=None, account_ids=None):
         account_nm = (item.get('account_nm') or '').replace(' ', '')
         account_id = normalize_account_id(item.get('account_id'))
         if target_ids and account_id in target_ids:
-            val = parse_dart_int(item.get('thstrm_amount'))
+            val = pick_numeric_amount(item)
             if val is not None:
                 return val
         for kw in normalized_keywords:
             if kw and kw in account_nm:
-                val = parse_dart_int(item.get('thstrm_amount'))
+                val = pick_numeric_amount(item)
                 if val is not None:
                     return val
     return None
@@ -548,18 +556,61 @@ def calc_quarter(annual, prev_cum):
         return annual
     return annual - prev_cum
 
+
+def calc_quarter_q4_safe(fy_cum, q3_cum):
+    """Q4 단일값 계산(보수적): FY-Q3, 단 FY<Q3이면 FY를 그대로 사용"""
+    if fy_cum is None:
+        return None
+    if q3_cum is None:
+        return fy_cum
+    return fy_cum - q3_cum if fy_cum >= q3_cum else fy_cum
+
+
+def detect_fs_sj_by_quarter_logic(corp_code, year):
+    """연도별로 분기/반기/3Q/연간 순서로 유효한 fs_div, sj_div 조합 탐색"""
+    reprt_choices = [REPRT_CODES['Q1'], REPRT_CODES['H1'], REPRT_CODES['Q3'], REPRT_CODES['FY']]
+    for reprt_code in reprt_choices:
+        for fs_div in ['CFS', 'OFS']:
+            for sj_div in ['IS', 'CIS']:
+                rows = get_fin_data(corp_code, year, reprt_code, fs_div, sj_div)
+                if not rows:
+                    continue
+                metrics = parse_metrics(rows)
+                if any(metrics.get(k) is not None for k in ['매출액', '영업이익', '당기순이익']):
+                    return fs_div, sj_div
+    return 'CFS', 'IS'
+
+
+def fetch_report_metrics(corp_code, year, reprt_code, fs_div, sj_div):
+    """동일 fs/sj 기준으로 IS+CIS/BS/CF를 모아 누적 지표 파싱"""
+    rows = []
+    if sj_div in ('IS', 'CIS'):
+        rows.extend(get_fin_data(corp_code, year, reprt_code, fs_div, sj_div))
+    rows.extend(get_fin_data(corp_code, year, reprt_code, fs_div, 'BS'))
+    rows.extend(get_fin_data(corp_code, year, reprt_code, fs_div, 'CF'))
+    return parse_metrics(rows) if rows else {}
+
+
+def fetch_equity_end(corp_code, year, reprt_code, fs_div):
+    """BS 기준 시점 자본총계"""
+    bs_rows = get_fin_data(corp_code, year, reprt_code, fs_div, 'BS')
+    if not bs_rows:
+        return None
+    return parse_metrics(bs_rows).get('자본총계')
+
 def get_quarterly_metrics(corp_code, year):
     """특정 연도의 분기별 재무지표 딕셔너리 반환
     반환: {1: metrics, 2: metrics, 3: metrics, 4: metrics}
     """
     quarters = {}
 
-    # Q1, H1, 9M, FY 각각 조회
+    fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, year)
+
+    # 동일 fs/sj 기준으로 Q1, H1, 9M, FY 누적값 조회
     fin = {}
     for q, code in REPRT_CODES.items():
-        data, _ = get_financial_statements(corp_code, year, code)
-        fin[q] = parse_metrics(data) if data else {}
-        time.sleep(0.3)
+        fin[q] = fetch_report_metrics(corp_code, year, code, fs_div, sj_div)
+        time.sleep(0.2)
 
     keys = ['매출액', '매출원가', '판관비', '영업이익', '당기순이익',
             '자본총계', 'CAPEX', '영업활동현금흐름']
@@ -573,8 +624,10 @@ def get_quarterly_metrics(corp_code, year):
     # Q3 = 9M - H1
     q3 = {k: calc_quarter(fin['Q3'].get(k), fin['H1'].get(k)) for k in keys}
 
-    # Q4 = FY - 9M
+    # Q4 = FY - 9M (보수적 처리)
     q4 = {k: calc_quarter(fin['FY'].get(k), fin['Q3'].get(k)) for k in keys}
+    for k in ['매출액', '매출원가', '판관비', '영업이익', '당기순이익', 'CAPEX', '영업활동현금흐름']:
+        q4[k] = calc_quarter_q4_safe(fin['FY'].get(k), fin['Q3'].get(k))
 
     # BS 항목(자본총계)은 각 시점 잔액 그대로 사용
     q1['자본총계'] = fin['Q1'].get('자본총계')
@@ -582,14 +635,25 @@ def get_quarterly_metrics(corp_code, year):
     q3['자본총계'] = fin['Q3'].get('자본총계')
     q4['자본총계'] = fin['FY'].get('자본총계')
 
-    # 비율 계산
-    for q_data in [q1, q2, q3, q4]:
-        if q_data.get('매출액') and q_data.get('영업이익') is not None:
-            q_data['영업이익률'] = q_data['영업이익'] / q_data['매출액']
+    # 비율 계산 (ROE는 평균자본 기반 연율화)
+    prev_year_eq = fetch_equity_end(corp_code, year - 1, REPRT_CODES['FY'], fs_div)
+    eq_end = [q1.get('자본총계'), q2.get('자본총계'), q3.get('자본총계'), q4.get('자본총계')]
+    q_list = [q1, q2, q3, q4]
+
+    for idx, q_data in enumerate(q_list):
+        rev = q_data.get('매출액')
+        op = q_data.get('영업이익')
+        if rev is not None and rev != 0 and op is not None:
+            q_data['영업이익률'] = op / rev
         else:
             q_data['영업이익률'] = None
-        if q_data.get('자본총계') and q_data.get('당기순이익') is not None:
-            q_data['ROE'] = (q_data['당기순이익'] / q_data['자본총계']) * 4
+
+        ni = q_data.get('당기순이익')
+        eq_curr = eq_end[idx]
+        eq_prev = prev_year_eq if idx == 0 else eq_end[idx - 1]
+        if ni is not None and eq_curr not in (None, 0) and eq_prev not in (None, 0):
+            avg_eq = (eq_curr + eq_prev) / 2
+            q_data['ROE'] = (ni * 4 / avg_eq) if avg_eq != 0 else None
         else:
             q_data['ROE'] = None
 
@@ -1212,7 +1276,7 @@ def run_analysis(spreadsheet):
 
     # ===== 분기 재무 데이터 =====
     print("\n[3/6] 분기별 재무 데이터 수집 중...")
-    for year in range(2022, current_year + 1):
+    for year in range(2020, current_year + 1):
         print(f"  {year}년 분기 데이터 조회 중...")
         quarterly = get_quarterly_metrics(corp_code, year)
         write_quarterly_data(ws_stock, year, quarterly)

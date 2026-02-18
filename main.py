@@ -845,6 +845,13 @@ def build_financial_context_text(annual_metrics_by_year, quarterly_by_year):
     return "\n".join(lines)
 
 
+def format_korean_date(value):
+    dt = parse_news_date(value)
+    if not dt:
+        return str(value or '')
+    return f"{dt.year}년 {dt.month}월 {dt.day}일"
+
+
 def to_multiline_numbered(values):
     if isinstance(values, list):
         cleaned = [str(v).strip() for v in values if str(v).strip()]
@@ -1198,7 +1205,7 @@ def write_news_data(ws, news_items, investment_points):
     """뉴스수집 시트에 데이터 쓰기"""
     rows = []
     for i, item in enumerate(news_items):
-        pub_date = item.get('pubDate', '')
+        pub_date = format_korean_date(item.get('pubDate', ''))
         title = clean_html(item.get('title', ''))
         desc = clean_html(item.get('description', ''))[:300]
         link = item.get('originallink') or item.get('link') or item.get('url') or ''

@@ -1017,7 +1017,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5-nano",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.3,
@@ -1102,7 +1102,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-5-nano",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.3,
@@ -1135,11 +1135,11 @@ def generate_news_investment_points(news_items, company_name):
 
     try:
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-5-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.7,
-            max_tokens=1500
+            max_completion_tokens=1500
         )
         result = json.loads(response.choices[0].message.content)
         return result.get('포인트', [])
@@ -1308,7 +1308,7 @@ def run_analysis(spreadsheet):
             return False
 
     # ===== 연간 재무 데이터 =====
-    print("\n[2/6] 연간 재무 데이터 수집 중...")
+    print("\n[1/7] 연간 재무 데이터 수집 중...")
     ws_stock = spreadsheet.worksheet('주식분석 값 입력')
     current_year = datetime.now().year
     financial_summary_parts = []
@@ -1339,7 +1339,7 @@ def run_analysis(spreadsheet):
     financial_summary = "\n".join(financial_summary_parts)
 
     # ===== 분기 재무 데이터 =====
-    print("\n[3/6] 분기별 재무 데이터 수집 중...")
+    print("\n[2/7] 분기별 재무 데이터 수집 중...")
     for year in range(2020, current_year + 1):
         print(f"  {year}년 분기 데이터 조회 중...")
         quarterly = get_quarterly_metrics(corp_code, year)
@@ -1349,7 +1349,7 @@ def run_analysis(spreadsheet):
         time.sleep(0.5)
 
     # ===== 뉴스 수집 =====
-    print(f"\n[4/7] 뉴스 수집 중... ({company_name})")
+    print(f"\n[3/7] 뉴스 수집 중... ({company_name})")
     news_items = collect_news_items(company_name, min_count=MIN_NEWS_COUNT)
     print(f"  ✅ {len(news_items)}개 뉴스 수집 (국내+해외, 5년 이내)")
 
@@ -1362,7 +1362,7 @@ def run_analysis(spreadsheet):
     print("  ✅ 뉴스수집 시트 입력 완료")
 
     # ===== DART 공시 및 사업보고서 원문 수집 =====
-    print(f"\n[5/7] DART 공시 및 사업보고서 원문 수집 중...")
+    print(f"\n[4/7] DART 공시 및 사업보고서 원문 수집 중...")
     disclosures = get_dart_disclosures(corp_code, count=20)
     disclosure_titles = "\n".join([
         f"- {d.get('rcept_dt','')} [{d.get('report_nm','')}]"
@@ -1376,7 +1376,7 @@ def run_analysis(spreadsheet):
     print(f"  ✅ 사업보고서 원문 {len(report_text)}자 추출" if report_text else "  ⚠️ 사업보고서 원문 없음")
 
     # ===== 산업/기업 분석 =====
-    print("\n[6/7] 산업 및 기업 분석 생성 중...")
+    print("\n[5/7] 산업 및 기업 분석 생성 중...")
     analysis = generate_industry_analysis(
         company_name, stock_code, news_items, financial_summary,
         report_text=report_text, disclosure_titles=disclosure_titles,
@@ -1389,7 +1389,7 @@ def run_analysis(spreadsheet):
     print("  ✅ 산업 이해 및 기업 상황 시트 입력 완료")
 
     # ===== 경쟁 분석 =====
-    print("\n[7/7] 경쟁현황 분석 생성 중...")
+    print("\n[6/7] 경쟁현황 분석 생성 중...")
     competition = generate_competition_analysis(
         company_name, stock_code, news_items, financial_summary,
         report_text=report_text, disclosure_titles=disclosure_titles

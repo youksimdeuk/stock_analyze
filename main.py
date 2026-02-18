@@ -96,6 +96,15 @@ REPRT_CODES = {
     'FY': '11011',   # 사업보고서(연간)
 }
 
+SHEET_ALIASES = {
+    'corp_map': ['corp_map', 'corp map', 'corp-map', 'corpcode', 'corp_code'],
+    '주식분석 값 입력': ['주식분석 값 입력', '주식분석값입력', '주식 분석 값 입력', '주식분석 값입력'],
+    '뉴스수집': ['뉴스수집', '뉴스 수집'],
+    '산업 이해 및 기업 상황': ['산업 이해 및 기업 상황', '산업이해 및 기업상황', '산업 이해', '기업 상황'],
+    '경쟁현황': ['경쟁현황', '경쟁 현황'],
+    '현재가 구하기': ['현재가 구하기', '현재가구하기'],
+}
+
 # =====================================================
 # Google Sheets 인증
 # =====================================================
@@ -987,6 +996,48 @@ def format_korean_date(value):
     return f"{dt.year}년 {dt.month}월 {dt.day}일"
 
 
+def normalize_sheet_title(name):
+    return re.sub(r'[\s_-]+', '', str(name or '').strip()).lower()
+
+
+def find_worksheet(spreadsheet, canonical_name, create_if_missing=False, rows=2000, cols=26):
+    aliases = SHEET_ALIASES.get(canonical_name, [canonical_name])
+    target_norms = {normalize_sheet_title(x) for x in aliases}
+
+    for ws in spreadsheet.worksheets():
+        if normalize_sheet_title(ws.title) in target_norms:
+            return ws
+
+    if create_if_missing:
+        ws = spreadsheet.add_worksheet(title=canonical_name, rows=rows, cols=cols)
+        if canonical_name == '뉴스수집':
+            ws.update(
+                values=[['날짜', '핵심요약', '원본링크(하이퍼링크)', '투자포인트', '비고']],
+                range_name='A1:E1',
+                value_input_option='USER_ENTERED'
+            )
+        elif canonical_name == '산업 이해 및 기업 상황':
+            ws.update(
+                values=[['항목', '내용', '근거 링크']],
+                range_name='A2:C2',
+                value_input_option='USER_ENTERED'
+            )
+        elif canonical_name == '경쟁현황':
+            ws.update(
+                values=[[
+                    '기업명', '최근 3년 매출', '최근 3년 영업이익', '시장점유율(%)', '순위(국내/글로벌)',
+                    '주요 제품(매출액/비중)', '강점', '약점/리스크', 'CAPEX/증설',
+                    '최근 3년 기업활동 뉴스', '뉴스 원본 링크', '투자 고민 포인트', '비고'
+                ]],
+                range_name='A1:M1',
+                value_input_option='USER_ENTERED'
+            )
+        print(f"  [안내] '{canonical_name}' 시트가 없어 새로 생성했습니다.")
+        return ws
+
+    raise gspread.WorksheetNotFound(canonical_name)
+
+
 def to_multiline_numbered(values):
     if isinstance(values, list):
         cleaned = [str(v).strip() for v in values if str(v).strip()]
@@ -1087,7 +1138,100 @@ def filter_stock_price_news(news_items):
 # OpenAI 분석
 # =====================================================
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=90.0, max_retries=2)
+OPENAI_MODEL_PRIMARY = 'gpt-5-mini'
+OPENAI_MODEL_FALLBACK = 'gpt-4o-mini'
+
+
+def extract_message_text(message):
+    if not message:
+        return ''
+
+    content = getattr(message, 'content', '')
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get('text') or item.get('content') or ''
+                if text:
+                    parts.append(str(text))
+                continue
+            text = getattr(item, 'text', None)
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts).strip()
+
+    return str(content or '').strip()
+
+
+def parse_json_from_chat_response(response):
+    try:
+        message = response.choices[0].message
+    except Exception:
+        return {}
+
+    text = extract_message_text(message)
+    if not text:
+        return {}
+
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        pass
+
+    # 모델이 JSON 앞뒤로 설명 문구를 붙이는 경우 대비
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start:end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
+    models = [OPENAI_MODEL_PRIMARY, OPENAI_MODEL_FALLBACK]
+    last_err = None
+
+    for model in models:
+        for use_json_format in (True, False):
+            mode_label = "json_format" if use_json_format else "text_format"
+            for attempt in range(1, 4):
+                try:
+                    kwargs = {
+                        'model': model,
+                        'messages': [{"role": "user", "content": prompt}],
+                        'max_tokens': max_completion_tokens,
+                    }
+                    if use_json_format:
+                        kwargs['response_format'] = {"type": "json_object"}
+                    response = openai_client.chat.completions.create(**kwargs)
+                    result = parse_json_from_chat_response(response)
+                    if result:
+                        if model != OPENAI_MODEL_PRIMARY:
+                            print(f"  [안내] {task_label}: 폴백 모델({model}) 사용")
+                        if not use_json_format:
+                            print(f"  [안내] {task_label}: {mode_label} 모드로 복구")
+                        return result
+                    finish = getattr(getattr(response, 'choices', [None])[0], 'finish_reason', 'unknown') if response.choices else 'unknown'
+                    raise ValueError(f"빈 JSON 응답 (finish_reason={finish})")
+                except Exception as e:
+                    last_err = e
+                    msg = str(e)
+                    err_type = type(e).__name__
+                    print(f"  [재시도] {task_label} {model} {mode_label} {attempt}/3 실패: {err_type}: {msg}")
+                    if attempt < 3:
+                        time.sleep(1.0 * attempt)
+                        continue
+        # primary 모델 실패 시 fallback 모델로 진행
+    raise last_err if last_err else RuntimeError(f"{task_label} 호출 실패")
+
 
 def generate_industry_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', financial_detail=''):
     """산업 이해 및 기업 상황 시트 내용 생성"""
@@ -1151,13 +1295,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 }}"""
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_completion_tokens=3000
-        )
-        return json.loads(response.choices[0].message.content)
+        return call_openai_json(prompt, max_completion_tokens=3000, task_label='산업분석')
     except Exception as e:
         print(f"  [오류] OpenAI 분석 생성 실패: {e}")
         return {}
@@ -1235,13 +1373,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 }}"""
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_completion_tokens=2500
-        )
-        return json.loads(response.choices[0].message.content)
+        return call_openai_json(prompt, max_completion_tokens=2500, task_label='경쟁분석')
     except Exception as e:
         print(f"  [오류] OpenAI 경쟁분석 생성 실패: {e}")
         return {}
@@ -1267,14 +1399,11 @@ def generate_news_investment_points(news_items, company_name):
 {{"포인트": ["뉴스1 투자포인트", "뉴스2 투자포인트", ...]}}"""
 
     try:
-        response = openai_client.chat.completions.create(
-            model="gpt-5-mini",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_completion_tokens=1500
-        )
-        result = json.loads(response.choices[0].message.content)
-        return result.get('포인트', [])
+        result = call_openai_json(prompt, max_completion_tokens=1500, task_label='투자포인트')
+        points = result.get('포인트')
+        if not isinstance(points, list):
+            points = next((v for v in result.values() if isinstance(v, list)), [])
+        return [str(x).strip() for x in points if str(x).strip()]
     except Exception as e:
         print(f"  [오류] 투자포인트 생성 실패: {e}")
         return []
@@ -1417,11 +1546,18 @@ def run_analysis(spreadsheet):
     print("=" * 50)
 
     # corp_map 읽기
-    ws_corp_map = spreadsheet.worksheet('corp_map')
+    ws_corp_map = find_worksheet(spreadsheet, 'corp_map')
     corp_data = ws_corp_map.get_all_values()
-    stock_code = str(corp_data[1][0]).strip().zfill(6) if corp_data[1][0] else None
-    corp_code = str(corp_data[1][1]).strip() if corp_data[1][1] else None
-    company_name = str(corp_data[1][2]).strip() if corp_data[1][2] else None
+    if len(corp_data) < 2:
+        raise RuntimeError("corp_map 시트 2행(A2:C2)에 종목코드/고유번호/기업명을 입력해주세요.")
+    row2 = (corp_data[1] + ['', '', ''])[:3]
+    stock_code = str(row2[0]).strip().zfill(6) if row2[0] else None
+    corp_code = str(row2[1]).strip() if row2[1] else None
+    company_name = str(row2[2]).strip() if row2[2] else None
+    if not company_name:
+        company_name = str(spreadsheet.title).replace('-기업분석', '').strip()
+    if not stock_code:
+        raise RuntimeError("corp_map!A2 종목코드(6자리)가 비어 있습니다.")
 
     print(f"\n분석 대상: {company_name} (종목코드: {stock_code})")
 
@@ -1441,7 +1577,7 @@ def run_analysis(spreadsheet):
 
     # ===== 연간 재무 데이터 =====
     print("\n[1/7] 연간 재무 데이터 수집 중...")
-    ws_stock = spreadsheet.worksheet('주식분석 값 입력')
+    ws_stock = find_worksheet(spreadsheet, '주식분석 값 입력')
     current_year = datetime.now().year
     financial_summary_parts = []
     annual_metrics_by_year = []
@@ -1490,7 +1626,7 @@ def run_analysis(spreadsheet):
     print("  투자 포인트 생성 중...")
     investment_points = generate_news_investment_points(news_items, company_name)
 
-    ws_news = spreadsheet.worksheet('뉴스수집')
+    ws_news = find_worksheet(spreadsheet, '뉴스수집', create_if_missing=True)
     write_news_data(ws_news, news_items, investment_points)
     print("  ✅ 뉴스수집 시트 입력 완료")
 
@@ -1515,7 +1651,7 @@ def run_analysis(spreadsheet):
         report_text=report_text, disclosure_titles=disclosure_titles,
         financial_detail=build_financial_context_text(annual_metrics_by_year, quarterly_by_year)
     )
-    ws_industry = spreadsheet.worksheet('산업 이해 및 기업 상황')
+    ws_industry = find_worksheet(spreadsheet, '산업 이해 및 기업 상황', create_if_missing=True)
     source_links = [item.get('link') or item.get('originallink') for item in news_items[:12]]
     source_links = [x for x in source_links if x] + disclosure_links[:12]
     write_industry_analysis(ws_industry, analysis, source_links)
@@ -1527,14 +1663,14 @@ def run_analysis(spreadsheet):
         company_name, stock_code, news_items, financial_summary,
         report_text=report_text, disclosure_titles=disclosure_titles
     )
-    ws_competition = spreadsheet.worksheet('경쟁현황')
+    ws_competition = find_worksheet(spreadsheet, '경쟁현황', create_if_missing=True)
     write_competition_data(ws_competition, competition, company_name)
     print("  ✅ 경쟁현황 시트 입력 완료")
 
     # ===== 현재가 구하기 시트 =====
     print("\n[7/7] 현재가 구하기 시트 데이터 수집 중...")
     try:
-        ws_price = spreadsheet.worksheet('현재가 구하기')
+        ws_price = find_worksheet(spreadsheet, '현재가 구하기')
         year_bs, reprt_bs, fs_div_bs, bs_data = detect_latest_bs(corp_code)
         if bs_data:
             issued, treasury, float_s = fetch_latest_shares(corp_code, year_bs, reprt_bs)
@@ -1558,7 +1694,7 @@ def run_analysis(spreadsheet):
 def is_already_analyzed(spreadsheet):
     """뉴스수집 시트 A2가 비어있으면 미분석으로 판단"""
     try:
-        ws = spreadsheet.worksheet('뉴스수집')
+        ws = find_worksheet(spreadsheet, '뉴스수집')
         val = ws.acell('A2').value
         return bool(val and val.strip())
     except Exception:
@@ -1568,6 +1704,35 @@ def find_analysis_spreadsheets(gc):
     """'-기업분석'으로 끝나는 구글 스프레드시트 목록 반환"""
     files = gc.list_spreadsheet_files()
     return [f for f in files if f['name'].endswith('-기업분석')]
+
+
+def dedupe_analysis_files(files):
+    """동일 파일(id) 중복 및 동일 이름(name) 중복 제거"""
+    unique = []
+    seen_ids = set()
+    seen_names = set()
+    skipped = []
+
+    for f in files:
+        file_id = str(f.get('id') or '').strip()
+        name = str(f.get('name') or '').strip()
+        if not file_id:
+            skipped.append((name or '[이름없음]', 'id 없음'))
+            continue
+        if file_id in seen_ids:
+            skipped.append((name or '[이름없음]', 'id 중복'))
+            continue
+        seen_ids.add(file_id)
+
+        # 동일 기업명 파일이 여러 개면 첫 번째 1개만 처리
+        if name in seen_names:
+            skipped.append((name or '[이름없음]', '이름 중복'))
+            continue
+        seen_names.add(name)
+
+        unique.append(f)
+
+    return unique, skipped
 
 def run_all_pending(gc):
     """미분석 스프레드시트 모두 처리"""
@@ -1602,13 +1767,17 @@ def run_all_pending(gc):
             return summary
 
     print(f"\n[스캔] '-기업분석' 시트 검색 중...")
-    files = find_analysis_spreadsheets(gc)
-    if not files:
+    all_files = find_analysis_spreadsheets(gc)
+    if not all_files:
         print("  '-기업분석'으로 끝나는 시트가 없습니다.")
         return summary
 
+    files, skipped_dupes = dedupe_analysis_files(all_files)
     summary['found'] = len(files)
-    print(f"  총 {len(files)}개 발견: {[f['name'] for f in files]}")
+    print(f"  총 {len(all_files)}개 발견 / 중복제거 후 {len(files)}개 처리: {[f['name'] for f in files]}")
+    if skipped_dupes:
+        skipped_desc = ", ".join([f"{name}({reason})" for name, reason in skipped_dupes])
+        print(f"  [중복건너뜀] {skipped_desc}")
 
     for f in files:
         try:

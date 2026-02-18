@@ -455,13 +455,19 @@ def write_price_sheet(ws, bs, issued, treasury, float_shares):
 
 def parse_dart_int(value):
     text = str(value or '').strip()
-    if not text or text in {'-', '--', 'N/A'}:
+    if not text or text in {'-', '--', 'N/A', '—', '–'}:
         return None
+    neg = False
+    if text.startswith('△'):
+        neg = True
+        text = text[1:]
     text = text.replace(',', '')
     if text.startswith('(') and text.endswith(')'):
-        text = f"-{text[1:-1]}"
+        neg = True
+        text = text[1:-1]
     try:
-        return int(float(text))
+        n = int(float(text))
+        return -n if neg else n
     except Exception:
         return None
 
@@ -540,7 +546,13 @@ def pick_is_core_from_rows(fin_list):
             continue
 
         if out['rev'] is None:
-            if any(k in nm for k in ['매출액', '수익매출액', '영업수익', '고객과의계약']):
+            if (
+                nm == '매출액'
+                or '수익매출액' in nm
+                or nm == '수익'
+                or '영업수익' in nm
+                or '고객과의계약' in nm
+            ):
                 out['rev'] = val
 
         if out['cogs'] is None:
@@ -560,7 +572,7 @@ def pick_is_core_from_rows(fin_list):
         if out['op'] is None and any(k in nm for k in ['영업이익', '영업손익', '영업손실']):
             out['op'] = val
 
-        if out['ni'] is None and any(k in nm for k in ['당기순이익', '당기순손익', '지배기업소유주']):
+        if out['ni'] is None and any(k in nm for k in ['당기순이익', '당기순손익', '연결당기순이익', '지배기업소유주']):
             out['ni'] = val
 
     if out['sga'] is None and selling is not None and admin is not None:
@@ -634,8 +646,10 @@ def parse_metrics(fin_list):
 
 def calc_quarter(annual, prev_cum):
     """단일 분기값 계산: annual(누적) - prev_cum(직전 누적)"""
-    if annual is None or prev_cum is None:
+    if annual is None:
         return None
+    if prev_cum is None:
+        return annual
     return annual - prev_cum
 
 

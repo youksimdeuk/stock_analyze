@@ -1214,24 +1214,67 @@ def find_analysis_spreadsheets(gc):
 
 def run_all_pending(gc):
     """미분석 스프레드시트 모두 처리"""
+    target_id = (os.getenv('TARGET_SPREADSHEET_ID') or '').strip()
+    force_reanalyze = (os.getenv('FORCE_REANALYZE') or '').strip().lower() in {'1', 'true', 'yes', 'y'}
+
+    summary = {
+        'found': 0,
+        'processed': 0,
+        'skipped': 0,
+        'failed': 0,
+    }
+
+    if target_id:
+        print(f"\n[직접실행] TARGET_SPREADSHEET_ID 지정됨: {target_id}")
+        try:
+            spreadsheet = gc.open_by_key(target_id)
+            summary['found'] = 1
+            if is_already_analyzed(spreadsheet) and not force_reanalyze:
+                print(f"  [{spreadsheet.title}] 이미 분석됨. 건너뜀. (FORCE_REANALYZE 미지정)")
+                summary['skipped'] += 1
+                return summary
+            ok = run_analysis(spreadsheet)
+            if ok:
+                summary['processed'] += 1
+            else:
+                summary['failed'] += 1
+            return summary
+        except Exception as e:
+            print(f"  [직접실행 오류] {e}")
+            summary['failed'] += 1
+            return summary
+
     print(f"\n[스캔] '-기업분석' 시트 검색 중...")
     files = find_analysis_spreadsheets(gc)
     if not files:
         print("  '-기업분석'으로 끝나는 시트가 없습니다.")
-        return
+        return summary
 
+    summary['found'] = len(files)
     print(f"  총 {len(files)}개 발견: {[f['name'] for f in files]}")
 
     for f in files:
         try:
             spreadsheet = gc.open_by_key(f['id'])
-            if is_already_analyzed(spreadsheet):
-                print(f"  [{f['name']}] 이미 분석됨. 건너뜀.")
+            if is_already_analyzed(spreadsheet) and not force_reanalyze:
+                print(f"  [{f['name']}] 이미 분석됨. 건너뜀. (FORCE_REANALYZE 미지정)")
+                summary['skipped'] += 1
                 continue
-            print(f"\n  [{f['name']}] 미분석 확인 → 분석 시작!")
-            run_analysis(spreadsheet)
+            print(f"\n  [{f['name']}] 분석 시작!")
+            ok = run_analysis(spreadsheet)
+            if ok:
+                summary['processed'] += 1
+            else:
+                summary['failed'] += 1
         except Exception as e:
             print(f"  [{f['name']}] 오류: {e}")
+            summary['failed'] += 1
+
+    print(
+        f"\n[요약] found={summary['found']}, processed={summary['processed']}, "
+        f"skipped={summary['skipped']}, failed={summary['failed']}"
+    )
+    return summary
 
 
 if __name__ == "__main__":
@@ -1239,6 +1282,11 @@ if __name__ == "__main__":
         validate_runtime_config()
         print("구글 계정 인증 중...")
         gc = get_google_client()
-        run_all_pending(gc)
+        result = run_all_pending(gc)
+        if result.get('failed', 0) > 0:
+            raise RuntimeError(f"분석 실패 건수: {result['failed']}")
+        if result.get('processed', 0) == 0:
+            print("[알림] 처리된 시트가 없습니다. TARGET_SPREADSHEET_ID 또는 FORCE_REANALYZE를 확인하세요.")
     except Exception as e:
         print(f"[실행중단] 설정 오류: {e}")
+        raise

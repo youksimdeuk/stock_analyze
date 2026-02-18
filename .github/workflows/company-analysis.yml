@@ -32,8 +32,8 @@ jobs:
       GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
       GOOGLE_CREDENTIALS_PATH: credentials.json
       GOOGLE_TOKEN_PATH: token.json
-      TARGET_SPREADSHEET_ID: ${{ github.event.inputs.target_spreadsheet_id || vars.TARGET_SPREADSHEET_ID }}
-      FORCE_REANALYZE: ${{ github.event.inputs.force_reanalyze || vars.FORCE_REANALYZE }}
+      TARGET_SPREADSHEET_ID: ${{ github.event.inputs.target_spreadsheet_id }}
+      FORCE_REANALYZE: ${{ github.event.inputs.force_reanalyze }}
 
     steps:
       - name: Checkout

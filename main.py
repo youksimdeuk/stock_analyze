@@ -205,15 +205,60 @@ def get_annual_report_text(corp_code, max_chars=8000):
 
 def get_corp_info(stock_code):
     """종목코드로 DART corp_code, 기업명 조회"""
+    stock_code = str(stock_code).zfill(6)
     url = "https://opendart.fss.or.kr/api/company.json"
-    params = {'crtfc_key': DART_API_KEY, 'stock_code': str(stock_code).zfill(6)}
+    params = {'crtfc_key': DART_API_KEY, 'stock_code': stock_code}
+    response_data = None
     try:
         r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-        if data.get('status') == '000':
-            return data.get('corp_code'), data.get('corp_name')
+        response_data = r.json()
+        if response_data.get('status') == '000':
+            return response_data.get('corp_code'), response_data.get('corp_name')
     except Exception as e:
         print(f"  [오류] corp_info 조회 실패: {e}")
+
+    if response_data:
+        print(
+            f"  [경고] company.json 실패: status={response_data.get('status')} "
+            f"message={response_data.get('message')}"
+        )
+
+    # company.json 실패 시 corpCode.xml 원본에서 폴백 조회
+    corp_code, corp_name = get_corp_info_from_master(stock_code)
+    if corp_code:
+        print(f"  [폴백성공] corpCode.xml에서 corp_code 조회: {corp_code}")
+        return corp_code, corp_name
+
+    return None, None
+
+
+def get_corp_info_from_master(stock_code):
+    """DART corpCode.xml(전체 목록)에서 종목코드로 corp_code 조회"""
+    url = "https://opendart.fss.or.kr/api/corpCode.xml"
+    params = {'crtfc_key': DART_API_KEY}
+    try:
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code != 200:
+            print(f"  [오류] corpCode.xml 다운로드 실패: HTTP {r.status_code}")
+            return None, None
+
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        xml_name = next((name for name in zf.namelist() if name.lower().endswith('.xml')), None)
+        if not xml_name:
+            print("  [오류] corpCode.xml 내부 XML 파일을 찾지 못했습니다.")
+            return None, None
+
+        xml_text = zf.read(xml_name).decode('utf-8', errors='ignore')
+        root = ET.fromstring(xml_text)
+        target = str(stock_code).zfill(6)
+        for node in root.findall('list'):
+            sc = (node.findtext('stock_code') or '').strip()
+            if sc == target:
+                return (node.findtext('corp_code') or '').strip(), (node.findtext('corp_name') or '').strip()
+
+        print(f"  [오류] corpCode.xml에서 stock_code={target}를 찾지 못했습니다.")
+    except Exception as e:
+        print(f"  [오류] corpCode.xml 파싱 실패: {e}")
     return None, None
 
 def get_financial_statements(corp_code, year, reprt_code):

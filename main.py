@@ -186,36 +186,59 @@ def get_dart_disclosures(corp_code, count=20):
 def get_annual_report_text(corp_code, max_chars=8000):
     """최근 사업보고서 원문 텍스트 추출"""
     try:
-        disclosures = get_dart_disclosures(corp_code, count=30)
+        disclosures = get_dart_disclosures(corp_code, count=50)
         annual = next((d for d in disclosures if '사업보고서' in d.get('report_nm', '')), None)
         if not annual:
+            print("  [원문] 공시 목록에서 사업보고서를 찾지 못했습니다.")
             return ''
         rcept_no = annual.get('rcept_no', '')
         if not rcept_no:
             return ''
 
+        print(f"  [원문] 사업보고서 다운로드 중: {annual.get('rcept_dt')} {annual.get('report_nm')}")
         r = requests.get(
             "https://opendart.fss.or.kr/api/document.xml",
             params={'crtfc_key': DART_API_KEY, 'rcept_no': rcept_no},
             timeout=30
         )
         if r.status_code != 200:
+            print(f"  [원문] document.xml HTTP 오류: {r.status_code}")
             return ''
 
-        zf = zipfile.ZipFile(io.BytesIO(r.content))
-        texts = []
-        for name in sorted(zf.namelist()):
-            if not any(name.lower().endswith(ext) for ext in ['.htm', '.html']):
-                continue
-            raw = zf.read(name).decode('utf-8', errors='ignore')
-            clean = re.sub(r'<[^>]+>', ' ', raw)
-            clean = re.sub(r'&[a-zA-Z]+;', ' ', clean)
-            clean = re.sub(r'\s+', ' ', clean).strip()
-            if len(clean) > 300:
-                texts.append(clean[:3000])
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(r.content))
+        except Exception:
+            print(f"  [원문] ZIP 파싱 실패 (응답이 ZIP이 아님, size={len(r.content)})")
+            return ''
 
-        return (' '.join(texts))[:max_chars]
-    except Exception:
+        all_files = zf.namelist()
+        print(f"  [원문] ZIP 내 파일 {len(all_files)}개: {all_files[:5]}")
+
+        texts = []
+        # 1순위: htm/html
+        target_files = [n for n in sorted(all_files)
+                        if any(n.lower().endswith(ext) for ext in ['.htm', '.html'])]
+        # 2순위: htm/html 없으면 xml (XBRL 제외)
+        if not target_files:
+            target_files = [n for n in sorted(all_files)
+                            if n.lower().endswith('.xml') and 'xbrl' not in n.lower()]
+
+        for name in target_files:
+            try:
+                raw = zf.read(name).decode('utf-8', errors='ignore')
+                clean = re.sub(r'<[^>]+>', ' ', raw)
+                clean = re.sub(r'&[a-zA-Z#0-9]+;', ' ', clean)
+                clean = re.sub(r'\s+', ' ', clean).strip()
+                if len(clean) > 300:
+                    texts.append(clean[:3000])
+            except Exception:
+                continue
+
+        result = (' '.join(texts))[:max_chars]
+        print(f"  [원문] 추출 완료: {len(result)}자 (파일 {len(texts)}개)")
+        return result
+    except Exception as e:
+        print(f"  [원문] 예외 발생: {e}")
         return ''
 
 def get_corp_info(stock_code):

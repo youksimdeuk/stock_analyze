@@ -1037,7 +1037,7 @@ def to_hyperlink_formula(url, label='원문보기'):
         return ''
     safe_url = str(url).replace('"', '""')
     safe_label = str(label).replace('"', '""')
-    return f'=HYPERLINK("{safe_url}", "{safe_label}")'
+    return f'=HYPERLINK("{safe_url}"; "{safe_label}")'
 
 
 def extract_urls(value):

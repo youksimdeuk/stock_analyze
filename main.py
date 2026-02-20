@@ -1178,7 +1178,7 @@ def to_multiline_numbered(values):
         cleaned = [str(v).strip() for v in values if str(v).strip()]
         return "\n".join([f"{i + 1}. {v}" for i, v in enumerate(cleaned)])
     text = str(values or '').strip()
-    return text if text else '[자료 없음]'
+    return text
 
 
 def apply_batch_format(ws, requests):
@@ -1538,7 +1538,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 【주요 제품】
 - 사업보고서에 기재된 제품/서비스 목록 그대로 나열
 - 반드시 형식 지킬 것: "제품명 (매출액 OOO억원 / 전체 매출의 OO%)"
-- 매출 비중 불명 시 "[비중 자료 없음]" 표기
+- 매출 비중 불명 시 빈 문자열("") 처리
 
 【주요 제품 설명】
 - 각 주요 제품의 기능·용도·적용 산업 설명
@@ -1581,7 +1581,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 - 각 항목 최소 3개 bullet(•) 이상 작성 (자료가 있는 경우)
 - 모든 bullet은 구체적 수치(금액/비율/연도) 또는 출처 근거 포함
 - "지속적인 성장", "다양한 제품" 같은 모호한 일반론 절대 금지
-- 제공 자료에 없는 내용은 "[자료 없음]" 표기 (추측 금지)
+- 제공 자료에 없는 내용은 빈 문자열("") 처리 (추측 금지)
 - 반드시 순수 JSON 형식으로만 반환 (마크다운 코드블록 사용 금지):
 
 {{
@@ -1811,7 +1811,11 @@ def write_industry_analysis(ws, analysis, source_links):
         }
     }])
 
-NO_DATA_PATTERNS = {'[자료 없음]', '[원문 링크 없음]', '[링크 없음]', '[비고 없음]', '[내용 없음]'}
+NO_DATA_PATTERNS = {
+    '[자료 없음]', '[원문 링크 없음]', '[링크 없음]', '[비고 없음]', '[내용 없음]',
+    '[비중 자료 없음]', '[데이터 없음]', '[정보 없음]', '[수치 없음]', '[근거 없음]',
+    '[리포트 없음]', '[뉴스 없음]', '[공시 없음]', '[재무 데이터 없음]',
+}
 
 # =====================================================
 # 경쟁사 재무 수집
@@ -1875,12 +1879,16 @@ def fetch_competitor_financials(master_rows, exclude_name, current_year):
         time.sleep(0.1)
     return '\n\n'.join(summaries)
 
+_NO_DATA_RE = re.compile(r'^\[.*없음.*\]$|^\[.*없는.*\]$|^\[.*N/?A.*\]$', re.IGNORECASE)
+
 def strip_no_data(v):
     """GPT가 반환한 '[자료 없음]' 계열 문자열을 빈 문자열로 치환"""
     if not isinstance(v, str):
         return v
     stripped = v.strip()
-    return '' if stripped in NO_DATA_PATTERNS else stripped
+    if stripped in NO_DATA_PATTERNS or _NO_DATA_RE.match(stripped):
+        return ''
+    return stripped
 
 
 def write_competition_data(ws, competition, company_name):

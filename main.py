@@ -866,10 +866,8 @@ def get_quarterly_metrics(corp_code, year):
     # Q3 = 9M - H1
     q3 = {k: calc_quarter(fin['Q3'].get(k), fin['H1'].get(k)) for k in keys}
 
-    # Q4 = FY - 9M (보수적 처리)
+    # Q4 = FY - 9M
     q4 = {k: calc_quarter(fin['FY'].get(k), fin['Q3'].get(k)) for k in keys}
-    for k in ['매출액', '매출원가', '판관비', '영업이익', '당기순이익', 'CAPEX', '영업활동현금흐름']:
-        q4[k] = calc_quarter_q4_safe(fin['FY'].get(k), fin['Q3'].get(k))
 
     # BS 항목(자본총계)은 각 시점 잔액 그대로 사용
     q1['자본총계'] = fin['Q1'].get('자본총계')

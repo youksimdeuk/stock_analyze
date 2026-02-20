@@ -1540,7 +1540,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 }}"""
 
     try:
-        return call_openai_json(prompt, max_completion_tokens=6000, task_label='산업분석')
+        return call_openai_json(prompt, max_completion_tokens=12000, task_label='산업분석')
     except Exception as e:
         print(f"  [오류] OpenAI 분석 생성 실패: {e}")
         return {}
@@ -1622,7 +1622,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 }}"""
 
     try:
-        return call_openai_json(prompt, max_completion_tokens=6000, task_label='경쟁분석')
+        return call_openai_json(prompt, max_completion_tokens=12000, task_label='경쟁분석')
     except Exception as e:
         print(f"  [오류] OpenAI 경쟁분석 생성 실패: {e}")
         return {}
@@ -1648,7 +1648,7 @@ def generate_news_investment_points(news_items, company_name):
 {{"포인트": ["뉴스1 투자포인트", "뉴스2 투자포인트", ...]}}"""
 
     try:
-        result = call_openai_json(prompt, max_completion_tokens=1500, task_label='투자포인트')
+        result = call_openai_json(prompt, max_completion_tokens=3000, task_label='투자포인트')
         points = result.get('포인트')
         if not isinstance(points, list):
             points = next((v for v in result.values() if isinstance(v, list)), [])
@@ -1987,7 +1987,7 @@ def run_analysis(spreadsheet):
     print("\n[6/8] 산업 및 기업 분석 생성 중...")
     analysis = generate_industry_analysis(
         company_name, stock_code, news_items, financial_summary,
-        report_text=report_text, disclosure_titles=disclosure_titles,
+        report_text=report_text[:15000], disclosure_titles=disclosure_titles,
         financial_detail=build_financial_context_text(annual_metrics_by_year, quarterly_by_year),
         research_text=research_text,
     )

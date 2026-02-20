@@ -15,6 +15,12 @@ Google 인증:
 
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 def _getenv(name, default=""):
     return (os.getenv(name, default) or "").strip()

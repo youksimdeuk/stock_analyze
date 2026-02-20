@@ -10,8 +10,13 @@ import os
 import io
 import re
 import json
+import sys
 import time
 import zipfile
+
+# Windows cp949 터미널에서 유니코드(이모지 등) 출력 오류 방지
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import xml.etree.ElementTree as ET
 import requests
 from datetime import datetime, timedelta
@@ -103,6 +108,7 @@ SHEET_ALIASES = {
     '산업 이해 및 기업 상황': ['산업 이해 및 기업 상황', '산업이해 및 기업상황', '산업 이해', '기업 상황'],
     '경쟁현황': ['경쟁현황', '경쟁 현황'],
     '현재가 구하기': ['현재가 구하기', '현재가구하기'],
+    '마스터': ['마스터', 'master', '마스터시트', 'master sheet'],
 }
 
 # =====================================================
@@ -183,8 +189,49 @@ def get_dart_disclosures(corp_code, count=20):
         pass
     return []
 
-def get_annual_report_text(corp_code, max_chars=8000):
-    """최근 사업보고서 원문 텍스트 추출"""
+def _clean_xml_text(chunk):
+    """XML/HTML 태그 제거 후 정규화된 텍스트 반환"""
+    t = re.sub(r'<[^>]+>', ' ', chunk)
+    t = re.sub(r'&[a-zA-Z#0-9]+;', ' ', t)
+    return re.sub(r'\s+', ' ', t).strip()
+
+
+def _extract_dart_sections(raw, max_chars):
+    """DART XML에서 TITLE 태그 기반으로 섹션 추출.
+    우선순위: II. 사업의 내용 → I. 회사의 개요 → 나머지
+    TITLE 태그가 없으면 None 반환 (폴백 처리 필요).
+    """
+    title_matches = list(re.finditer(r'<TITLE[^>]*>([^<]+)</TITLE>', raw))
+    if not title_matches:
+        return None
+
+    title_positions = [(m.start(), m.group(1).strip()) for m in title_matches]
+
+    def get_section(start_kw, end_kw):
+        start_pos = next((pos for pos, t in title_positions if start_kw in t), -1)
+        if start_pos < 0:
+            return ''
+        end_pos = next((pos for pos, t in title_positions if end_kw in t and pos > start_pos), len(raw))
+        return _clean_xml_text(raw[start_pos:end_pos])
+
+    sec_business = get_section('II. 사업의 내용', 'III. 재무에 관한 사항')
+    sec_overview  = get_section('I. 회사의 개요',  'II. 사업의 내용')
+
+    # 사업의 내용 우선, 남은 공간에 회사의 개요 추가
+    business_limit = int(max_chars * 0.8)
+    business_part  = sec_business[:business_limit]
+    remaining      = max_chars - len(business_part)
+    overview_part  = sec_overview[:remaining] if remaining > 0 else ''
+
+    combined = (business_part + ' ' + overview_part).strip()
+    return combined[:max_chars] if combined else None
+
+
+def get_annual_report_text(corp_code, max_chars=20000):
+    """최근 사업보고서 원문 텍스트 추출.
+    DART XML의 TITLE 태그로 '사업의 내용' 섹션을 우선 추출하고,
+    구조 인식 불가 시 파일 순서 기반 폴백.
+    """
     try:
         disclosures = get_dart_disclosures(corp_code, count=50)
         annual = next((d for d in disclosures if '사업보고서' in d.get('report_nm', '')), None)
@@ -212,30 +259,35 @@ def get_annual_report_text(corp_code, max_chars=8000):
             return ''
 
         all_files = zf.namelist()
-        print(f"  [원문] ZIP 내 파일 {len(all_files)}개: {all_files[:5]}")
 
+        # 가장 큰 파일 = 본문 전체가 담긴 메인 파일 (infolist로 메타데이터만 비교)
+        info_map = {info.filename: info.file_size for info in zf.infolist()}
+        xml_files = [n for n in all_files if n.lower().endswith('.xml') and 'xbrl' not in n.lower()]
+        htm_files = [n for n in all_files if any(n.lower().endswith(e) for e in ['.htm', '.html'])]
+
+        # ── 1순위: XML 메인 파일에서 TITLE 태그 기반 섹션 추출 ──
+        if xml_files:
+            main_file = max(xml_files, key=lambda n: info_map.get(n, 0))
+            raw = zf.read(main_file).decode('utf-8', errors='ignore')
+            result = _extract_dart_sections(raw, max_chars)
+            if result:
+                print(f"  [원문] 추출 완료: {len(result)}자 (섹션 기반)")
+                return result
+
+        # ── 2순위: HTM 파일들을 순서대로 합산 (폴백) ──
+        target_files = htm_files if htm_files else xml_files
         texts = []
-        # 1순위: htm/html
-        target_files = [n for n in sorted(all_files)
-                        if any(n.lower().endswith(ext) for ext in ['.htm', '.html'])]
-        # 2순위: htm/html 없으면 xml (XBRL 제외)
-        if not target_files:
-            target_files = [n for n in sorted(all_files)
-                            if n.lower().endswith('.xml') and 'xbrl' not in n.lower()]
-
         for name in target_files:
             try:
                 raw = zf.read(name).decode('utf-8', errors='ignore')
-                clean = re.sub(r'<[^>]+>', ' ', raw)
-                clean = re.sub(r'&[a-zA-Z#0-9]+;', ' ', clean)
-                clean = re.sub(r'\s+', ' ', clean).strip()
+                clean = _clean_xml_text(raw)
                 if len(clean) > 300:
-                    texts.append(clean[:5000])
+                    texts.append(clean[:7000])
             except Exception:
                 continue
 
         result = (' '.join(texts))[:max_chars]
-        print(f"  [원문] 추출 완료: {len(result)}자 (파일 {len(texts)}개)")
+        print(f"  [원문] 추출 완료: {len(result)}자 (파일 순서 기반, {len(texts)}개)")
         return result
     except Exception as e:
         print(f"  [원문] 예외 발생: {e}")
@@ -958,7 +1010,7 @@ def extract_urls(value):
 def to_multiline_hyperlink_formula(value, label_prefix='원문'):
     urls = extract_urls(value)
     if not urls:
-        return '[원문 링크 없음]'
+        return ''
     parts = []
     for i, url in enumerate(urls, start=1):
         safe_url = str(url).replace('"', '""')
@@ -969,13 +1021,13 @@ def to_multiline_hyperlink_formula(value, label_prefix='원문'):
 
 def fmt_eok(value):
     if value is None:
-        return '[자료 없음]'
+        return ''
     return f"{value/1e8:.1f}억원"
 
 
 def fmt_pct(value):
     if value is None:
-        return '[자료 없음]'
+        return ''
     return f"{value*100:.2f}%"
 
 
@@ -1158,6 +1210,103 @@ def filter_stock_price_news(news_items):
     return filtered
 
 # =====================================================
+# 증권사 리포트 수집 (네이버 증권)
+# =====================================================
+
+def fetch_naver_research_reports(company_name, count=3, max_chars_per_report=5000):
+    """네이버 증권 기업 리포트 PDF 최신 {count}개 다운로드 및 텍스트 추출
+    여러 페이지를 순회하며 종목명으로 클라이언트 필터링 (최대 10페이지 = 약 250개 리포트).
+    반환: (report_items list, combined_text str)
+    """
+    try:
+        import pdfplumber
+    except ImportError:
+        print("  [경고] pdfplumber 미설치. pip install pdfplumber 실행 후 재시도하세요.")
+        return [], ''
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://finance.naver.com/',
+    }
+
+    # 네이버 company_list는 서버 측 종목 필터링 미지원 → 페이지별 순회 후 클라이언트 필터링
+    norm_name = re.sub(r'[^가-힣A-Za-z0-9]', '', company_name).lower()
+    row_pattern = re.compile(r'<tr>(.*?)</tr>', re.DOTALL)
+    entries = []
+    max_pages = 10  # 최대 250개 최근 리포트 검색
+
+    for page in range(1, max_pages + 1):
+        try:
+            url = f'https://finance.naver.com/research/company_list.naver?page={page}'
+            r = requests.get(url, headers=headers, timeout=15)
+            html = r.content.decode('euc-kr', errors='ignore')
+        except Exception as e:
+            print(f"  [경고] 네이버 리포트 목록 조회 실패 (page={page}): {e}")
+            break
+
+        for row in row_pattern.findall(html):
+            pdf_m = re.search(r'href="(https://stock\.pstatic\.net/stock-research/[^"]+\.pdf)"', row)
+            if not pdf_m:
+                continue
+            # 행의 종목명 추출 후 대상 기업 필터링
+            stock_m = re.search(r'class="stock_item">([^<]+)</a>', row)
+            if not stock_m:
+                continue
+            row_name = re.sub(r'[^가-힣A-Za-z0-9]', '', stock_m.group(1)).lower()
+            if norm_name not in row_name and row_name not in norm_name:
+                continue
+            title_m = re.search(r'href="company_read\.naver[^"]*">([^<]+)</a>', row)
+            firm_m  = re.search(r'</td>\s*<td>([^<\s][^<]*)</td>\s*<td class="file">', row)
+            date_m  = re.search(r'<td class="date"[^>]*>([^<]+)</td>', row)
+            entries.append({
+                'url':   pdf_m.group(1),
+                'title': title_m.group(1).strip() if title_m else '리포트',
+                'firm':  firm_m.group(1).strip()  if firm_m  else '',
+                'date':  date_m.group(1).strip()  if date_m  else '',
+            })
+            if len(entries) >= count:
+                break
+        if len(entries) >= count:
+            break
+
+    if not entries:
+        print(f"  [경고] 최근 리포트 없음 ({company_name}) - GPT 지식 기반으로 분석")
+        return [], ''
+
+    report_items   = []
+    combined_texts = []
+
+    for entry in entries:
+        try:
+            pdf_r = requests.get(entry['url'], headers=headers, timeout=30)
+            if pdf_r.status_code != 200:
+                continue
+            with pdfplumber.open(io.BytesIO(pdf_r.content)) as pdf:
+                text = '\n'.join(
+                    p.extract_text() or '' for p in pdf.pages[:15]
+                )[:max_chars_per_report]
+            if not text.strip():
+                print(f"  [경고] 이미지 PDF (텍스트 추출 불가): {entry['title'][:40]}")
+                continue
+            firm_str      = f" ({entry['firm']})" if entry['firm'] else ''
+            display_title = f"[증권리포트{firm_str}] {entry['title']}"
+            report_items.append({
+                'title':        display_title,
+                'description':  text[:300],
+                'link':         entry['url'],
+                'pubDate':      entry['date'],
+                'published_dt': parse_news_date(entry['date']),
+                'source':       '증권사리포트',
+            })
+            combined_texts.append(f"【{display_title} | {entry['date']}】\n{text}")
+            print(f"  ✅ 리포트: {entry['title'][:40]} ({len(text)}자)")
+        except Exception as e:
+            print(f"  [경고] PDF 처리 실패 ({entry['title'][:30]}): {e}")
+
+    return report_items, '\n\n'.join(combined_texts)
+
+
+# =====================================================
 # OpenAI 분석
 # =====================================================
 
@@ -1264,7 +1413,7 @@ def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
     raise last_err if last_err else RuntimeError(f"{task_label} 호출 실패")
 
 
-def generate_industry_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', financial_detail=''):
+def generate_industry_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', financial_detail='', research_text=''):
     """산업 이해 및 기업 상황 시트 내용 생성"""
     news_lines = []
     for item in news_items[:50]:
@@ -1276,13 +1425,15 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
     news_text = "\n".join(news_lines)
 
     prompt = f"""당신은 한국 주식 투자 리서치 전문가입니다.
-아래 제공된 실제 자료(DART 사업보고서, 공시, 뉴스, 재무데이터)만을 근거로 분석을 작성하세요.
-제공된 자료에 없는 내용은 절대 추측하거나 생성하지 말고, 해당 항목에 "[자료 없음]"으로 표기하세요.
+아래 제공된 자료를 최대한 활용하고, 부족한 부분은 학습 지식으로 보완하되 "(추정)" 표기하세요.
 모든 금액은 반드시 KRW(원화)로만 표기하세요. 해외 통화가 원문에 있으면 KRW 환산값을 우선 표기하고 환산 기준을 함께 표기하세요.
 
 ■ 기업명: {company_name} (종목코드: {stock_code})
 
-■ DART 사업보고서 원문 (실제 공시 내용):
+■ 증권사 리포트 (최신 3개 본문):
+{research_text if research_text else '[리포트 없음]'}
+
+■ DART 사업보고서 원문:
 {report_text if report_text else '[사업보고서 원문 없음]'}
 
 ■ 최근 공시 목록:
@@ -1394,7 +1545,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
         print(f"  [오류] OpenAI 분석 생성 실패: {e}")
         return {}
 
-def generate_competition_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles=''):
+def generate_competition_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', competitor_financials='', research_text=''):
     """경쟁현황 시트 내용 생성"""
     news_text = "\n".join([
         f"- {clean_html(item.get('title',''))}: {clean_html(item.get('description',''))[:120]}"
@@ -1402,12 +1553,15 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
     ])
 
     prompt = f"""당신은 한국 주식 투자 리서치 전문가입니다.
-아래 제공된 실제 자료(DART 사업보고서, 공시, 뉴스, 재무데이터)만을 근거로 경쟁현황을 작성하세요.
-제공된 자료에 없는 수치나 사실은 절대 만들지 말고 "[자료 없음]"으로 표기하세요.
-빈칸은 절대 허용하지 않습니다. 모든 금액은 KRW(원화)로 표기하세요. 해외기업 데이터는 KRW 환산값과 환산기준(연도/환율)을 함께 적으세요.
+아래 제공된 자료를 우선 활용하고, 자료에 없는 내용은 당신의 학습 지식을 적극 활용하여 채우세요.
+단, 학습 지식 사용 시 "(추정)" 또는 "(일반적)" 표기를 붙이세요.
+모든 금액은 KRW(원화)로 표기하세요. 해외기업 데이터는 KRW 환산값과 환산기준(연도/환율)을 함께 적으세요.
 분석 대상 기업({company_name})은 반드시 경쟁사목록의 첫 번째 항목으로 넣으세요.
 
 ■ 기업명: {company_name} (종목코드: {stock_code})
+
+■ 증권사 리포트 (최신 3개 본문):
+{research_text if research_text else '[리포트 없음]'}
 
 ■ DART 사업보고서 원문 (경쟁현황 참고):
 {report_text if report_text else '[사업보고서 원문 없음]'}
@@ -1415,19 +1569,20 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 ■ 최근 공시 목록:
 {disclosure_titles if disclosure_titles else '[공시 없음]'}
 
-■ DART 재무데이터:
+■ 분석 대상 기업 DART 재무데이터:
 {financial_summary if financial_summary else '[재무 데이터 없음]'}
+
+■ 경쟁사 DART 재무데이터 (직접 수집):
+{competitor_financials if competitor_financials else '[경쟁사 재무 데이터 없음 - 학습 지식으로 보완하세요]'}
 
 ■ 최근 뉴스:
 {news_text if news_text else '[뉴스 없음]'}
 
-위 자료만 근거로 분석 대상 기업과 경쟁사를 포함하여 JSON으로 반환하세요.
-국내기업/해외기업 뉴스와 IR/PR/공시를 모두 반영하려고 시도하고, 없으면 "[자료 없음]"을 명시하세요.
-확인되지 않은 수치는 "[자료 없음]"으로 표기하세요.
-필수 필드:
-- 최근3년 기업활동 뉴스: 번호 줄바꿈 문자열 또는 배열
-- 뉴스 원본 링크: URL만 줄바꿈 문자열 또는 배열 (하이퍼링크 문구 금지)
-- 투자 고민 포인트, 비고 포함
+위 자료와 학습 지식을 종합하여 분석 대상 기업과 경쟁사를 포함하여 JSON으로 반환하세요.
+- 경쟁사는 사업보고서/뉴스에서 언급된 기업 + 마스터 시트 기업 모두 포함하세요.
+- DART 재무 수치는 그대로 사용하고, 없는 항목은 학습 지식으로 적극 채우되 "(추정)" 표기하세요.
+- "[자료 없음]" 표기는 절대 사용하지 마세요. 정말 모르면 빈 문자열("")로 두세요.
+- 뉴스 원본 링크: URL만 줄바꿈 문자열 (하이퍼링크 문구 금지)
 
 {{
   "경쟁사목록": [
@@ -1436,32 +1591,32 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
       "구분": "분석대상",
       "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
       "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
-      "시장점유율(%)": "OO% 또는 [자료 없음]",
-      "순위(국내/글로벌)": "국내 O위 / 글로벌 O위 또는 [자료 없음]",
+      "시장점유율(%)": "OO%(추정)",
+      "순위(국내/글로벌)": "국내 O위 / 글로벌 O위(추정)",
       "주요 제품(매출액/비중)": "제품명 (매출액 OOO억원 / OO%)",
-      "강점": "(공시/뉴스 근거)",
-      "약점/리스크": "(공시/뉴스 근거)",
-      "CAPEX/증설": "(공시/뉴스 근거 또는 [자료 없음])",
+      "강점": "내용",
+      "약점/리스크": "내용",
+      "CAPEX/증설": "내용",
       "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\\n2. ...",
-      "뉴스 원본 링크": "https://...\\nhttps://...",
-      "투자 고민 포인트": "• 투자 시 체크포인트",
-      "비고": "환산기준/추가메모 또는 [자료 없음]"
+      "뉴스 원본 링크": "https://...",
+      "투자 고민 포인트": "• 체크포인트",
+      "비고": "환산기준/추가메모"
     }},
     {{
-      "기업명": "(사업보고서/뉴스에서 언급된 경쟁사명)",
+      "기업명": "경쟁사명",
       "구분": "경쟁사",
-      "최근3년매출액": "2022: OOO억원 또는 [자료 없음]\\n2023: ...\\n2024: ...",
-      "최근3년영업이익": "2022: OOO억원 또는 [자료 없음]\\n2023: ...\\n2024: ...",
-      "시장점유율(%)": "(뉴스/공시 근거 또는 [자료 없음])",
-      "순위(국내/글로벌)": "(뉴스/공시 근거 또는 [자료 없음])",
-      "주요 제품(매출액/비중)": "(뉴스/공시 근거 또는 [자료 없음])",
-      "강점": "(뉴스/공시 근거 또는 [자료 없음])",
-      "약점/리스크": "(뉴스/공시 근거 또는 [자료 없음])",
-      "CAPEX/증설": "[자료 없음]",
-      "최근3년 기업활동 뉴스": "(관련 뉴스 또는 [자료 없음])",
-      "뉴스 원본 링크": "(URL 줄바꿈 또는 [자료 없음])",
-      "투자 고민 포인트": "(체크포인트 또는 [자료 없음])",
-      "비고": "(환산기준/추가메모 또는 [자료 없음])"
+      "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
+      "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
+      "시장점유율(%)": "OO%(추정)",
+      "순위(국내/글로벌)": "국내 O위 / 글로벌 O위(추정)",
+      "주요 제품(매출액/비중)": "제품명 (비중 OO%)",
+      "강점": "내용",
+      "약점/리스크": "내용",
+      "CAPEX/증설": "내용",
+      "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\\n2. ...",
+      "뉴스 원본 링크": "",
+      "투자 고민 포인트": "• 체크포인트",
+      "비고": "환산기준/추가메모"
     }}
   ]
 }}"""
@@ -1566,7 +1721,7 @@ def write_news_data(ws, news_items, investment_points):
         link = item.get('originallink') or item.get('link') or item.get('url') or ''
         point = investment_points[i] if i < len(investment_points) else ''
         summary = f"{title}\n{desc}".strip()
-        rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크') if link else '[원문 링크 없음]', point or '[자료 없음]', ''])
+        rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크') if link else '', point or '', ''])
 
     if rows:
         ws.batch_clear(['A2:E2000'])
@@ -1583,9 +1738,9 @@ def write_industry_analysis(ws, analysis, source_links):
     ]
     rows = []
     for i, section in enumerate(sections):
-        content = analysis.get(section) or '[자료 없음]'
+        content = strip_no_data(analysis.get(section) or '')
         link = source_links[i] if i < len(source_links) else ''
-        rows.append([section, content, to_hyperlink_formula(link, '근거링크') if link else '[자료 없음]'])
+        rows.append([section, content, to_hyperlink_formula(link, '근거링크') if link else ''])
     ws.batch_clear(['A3:C100'])
     ws.update(values=rows, range_name='A3:C14', value_input_option='USER_ENTERED')
     apply_batch_format(ws, [{
@@ -1595,6 +1750,78 @@ def write_industry_analysis(ws, analysis, source_links):
             'fields': 'userEnteredFormat(wrapStrategy,verticalAlignment)',
         }
     }])
+
+NO_DATA_PATTERNS = {'[자료 없음]', '[원문 링크 없음]', '[링크 없음]', '[비고 없음]', '[내용 없음]'}
+
+# =====================================================
+# 경쟁사 재무 수집
+# =====================================================
+
+def fetch_competitor_annual_summary(corp_code, name, current_year):
+    """경쟁사 최근 3년 IS 재무 요약 (매출/영업이익)"""
+    year_lines = []
+    for year in range(current_year - 2, current_year + 1):
+        metrics = {}
+        found = False
+        for fs_div in ['CFS', 'OFS']:
+            for sj_div in ['IS', 'CIS']:
+                rows = get_fin_data(corp_code, year, REPRT_CODES['FY'], fs_div, sj_div)
+                if rows:
+                    m = parse_metrics(rows)
+                    if m.get('매출액') is not None or m.get('영업이익') is not None:
+                        metrics = m
+                        found = True
+                        break
+                time.sleep(0.1)
+            if found:
+                break
+        rev = metrics.get('매출액')
+        op = metrics.get('영업이익')
+        opm = metrics.get('영업이익률')
+        if rev is not None or op is not None:
+            line = f"  {year}: 매출 {rev/1e8:.0f}억원" if rev is not None else f"  {year}:"
+            if op is not None:
+                line += f", 영업이익 {op/1e8:.0f}억원"
+            if opm is not None:
+                line += f", OPM {opm*100:.1f}%"
+            year_lines.append(line)
+        time.sleep(0.2)
+    if not year_lines:
+        return ''
+    return f"[{name}]\n" + '\n'.join(year_lines)
+
+
+def fetch_competitor_financials(master_rows, exclude_name, current_year):
+    """마스터 시트(A=기업명, B=종목코드) 기반 경쟁사 재무 요약 수집"""
+    if not master_rows or len(master_rows) < 2:
+        return ''
+    summaries = []
+    for row in master_rows[1:]:  # 1행 헤더 제외
+        if len(row) < 2:
+            continue
+        name = str(row[0]).strip()
+        stock_code = str(row[1]).strip()
+        if not name or not stock_code or name == exclude_name:
+            continue
+        stock_code = stock_code.zfill(6)
+        corp_code, _ = get_corp_info(stock_code)
+        if not corp_code:
+            print(f"  [경쟁사] {name}({stock_code}): corp_code 조회 실패, 건너뜀")
+            continue
+        print(f"  [경쟁사] {name} 재무 수집 중...")
+        summary = fetch_competitor_annual_summary(corp_code, name, current_year)
+        if summary:
+            summaries.append(summary)
+        time.sleep(0.1)
+    return '\n\n'.join(summaries)
+
+def strip_no_data(v):
+    """GPT가 반환한 '[자료 없음]' 계열 문자열을 빈 문자열로 치환"""
+    if not isinstance(v, str):
+        return v
+    stripped = v.strip()
+    return '' if stripped in NO_DATA_PATTERNS else stripped
+
 
 def write_competition_data(ws, competition, company_name):
     """경쟁현황 시트에 데이터 쓰기"""
@@ -1610,19 +1837,19 @@ def write_competition_data(ws, competition, company_name):
     rows = []
     for c in sorted_competitors:
         rows.append([
-            c.get('기업명') or '[자료 없음]',
-            c.get('최근3년매출액') or '[자료 없음]',
-            c.get('최근3년영업이익') or '[자료 없음]',
-            c.get('시장점유율(%)') or '[자료 없음]',
-            c.get('순위(국내/글로벌)') or '[자료 없음]',
-            c.get('주요 제품(매출액/비중)') or '[자료 없음]',
-            c.get('강점') or '[자료 없음]',
-            c.get('약점/리스크') or '[자료 없음]',
-            c.get('CAPEX/증설') or '[자료 없음]',
-            to_multiline_numbered(c.get('최근3년 기업활동 뉴스')),
+            strip_no_data(c.get('기업명') or ''),
+            strip_no_data(c.get('최근3년매출액') or ''),
+            strip_no_data(c.get('최근3년영업이익') or ''),
+            strip_no_data(c.get('시장점유율(%)') or ''),
+            strip_no_data(c.get('순위(국내/글로벌)') or ''),
+            strip_no_data(c.get('주요 제품(매출액/비중)') or ''),
+            strip_no_data(c.get('강점') or ''),
+            strip_no_data(c.get('약점/리스크') or ''),
+            strip_no_data(c.get('CAPEX/증설') or ''),
+            strip_no_data(to_multiline_numbered(c.get('최근3년 기업활동 뉴스'))),
             to_multiline_hyperlink_formula(c.get('뉴스 원본 링크'), '원문'),
-            c.get('투자 고민 포인트') or '[자료 없음]',
-            c.get('비고') or '[자료 없음]',
+            strip_no_data(c.get('투자 고민 포인트') or ''),
+            strip_no_data(c.get('비고') or ''),
         ])
 
     ws.batch_clear(['A2:M2000'])
@@ -1677,11 +1904,20 @@ def run_analysis(spreadsheet):
     annual_metrics_by_year = []
     quarterly_by_year = {}
 
-    for year in range(2020, current_year + 1):
+    # fs_div/sj_div 최신 연도 기준으로 1번만 탐색 후 전 연도 재사용
+    print("  재무제표 형식 탐색 중...", end=' ')
+    fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, current_year)
+    alt_fs_div = 'OFS' if fs_div == 'CFS' else 'CFS'
+    print(f"{fs_div}/{sj_div}")
+
+    for year in range(ANNUAL_YEAR_START, current_year + 1):
         print(f"  {year}년 조회 중...", end=' ')
-        fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, year)
         metrics = fetch_report_metrics(corp_code, year, REPRT_CODES['FY'], fs_div, sj_div)
         has_any = any(metrics.get(k) is not None for k in ['매출액', '영업이익', '당기순이익', '매출원가', '판관비'])
+        # 데이터 없으면 반대 fs_div로 폴백 (과거 연도 보고 형식 변경 대응)
+        if not has_any:
+            metrics = fetch_report_metrics(corp_code, year, REPRT_CODES['FY'], alt_fs_div, sj_div)
+            has_any = any(metrics.get(k) is not None for k in ['매출액', '영업이익', '당기순이익', '매출원가', '판관비'])
         if has_any:
             write_annual_data(ws_stock, year, metrics)
             annual_metrics_by_year.append((year, metrics))
@@ -1697,7 +1933,7 @@ def run_analysis(spreadsheet):
                 print(f"✅ 매출: {rev/1e8:.0f}억")
         else:
             print("데이터 없음")
-        time.sleep(0.5)
+        time.sleep(0.1)
 
     financial_summary = "\n".join(financial_summary_parts)
 
@@ -1709,12 +1945,21 @@ def run_analysis(spreadsheet):
         quarterly_by_year[year] = quarterly
         write_quarterly_data(ws_stock, year, quarterly)
         print(f"  ✅ {year}년 분기 완료")
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     # ===== 뉴스 수집 =====
-    print(f"\n[3/7] 뉴스 수집 중... ({company_name})")
+    print(f"\n[3/8] 뉴스 수집 중... ({company_name})")
     news_items = collect_news_items(company_name, min_count=MIN_NEWS_COUNT)
     print(f"  ✅ {len(news_items)}개 뉴스 수집 (국내+해외, 5년 이내)")
+
+    # ===== 증권사 리포트 수집 =====
+    print(f"\n[4/8] 증권사 리포트 수집 중... ({company_name})")
+    research_items, research_text = fetch_naver_research_reports(company_name, count=3)
+    if research_items:
+        print(f"  ✅ 리포트 {len(research_items)}개 수집 완료")
+        news_items = research_items + news_items  # 뉴스수집 시트 상단에 리포트 추가
+    else:
+        print("  ⚠️ 증권사 리포트 수집 실패, 건너뜀")
 
     # 투자 포인트 생성
     print("  투자 포인트 생성 중...")
@@ -1725,7 +1970,7 @@ def run_analysis(spreadsheet):
     print("  ✅ 뉴스수집 시트 입력 완료")
 
     # ===== DART 공시 및 사업보고서 원문 수집 =====
-    print(f"\n[4/7] DART 공시 및 사업보고서 원문 수집 중...")
+    print(f"\n[5/8] DART 공시 및 사업보고서 원문 수집 중...")
     disclosures = get_dart_disclosures(corp_code, count=20)
     disclosure_titles = "\n".join([
         f"- {d.get('rcept_dt','')} [{d.get('report_nm','')}]"
@@ -1735,15 +1980,16 @@ def run_analysis(spreadsheet):
     print(f"  ✅ 공시 {len(disclosures)}건 수집")
 
     print("  사업보고서 원문 다운로드 중... (시간이 걸릴 수 있음)")
-    report_text = get_annual_report_text(corp_code, max_chars=8000)
+    report_text = get_annual_report_text(corp_code, max_chars=20000)
     print(f"  ✅ 사업보고서 원문 {len(report_text)}자 추출" if report_text else "  ⚠️ 사업보고서 원문 없음")
 
     # ===== 산업/기업 분석 =====
-    print("\n[5/7] 산업 및 기업 분석 생성 중...")
+    print("\n[6/8] 산업 및 기업 분석 생성 중...")
     analysis = generate_industry_analysis(
         company_name, stock_code, news_items, financial_summary,
         report_text=report_text, disclosure_titles=disclosure_titles,
-        financial_detail=build_financial_context_text(annual_metrics_by_year, quarterly_by_year)
+        financial_detail=build_financial_context_text(annual_metrics_by_year, quarterly_by_year),
+        research_text=research_text,
     )
     ws_industry = find_worksheet(spreadsheet, '산업 이해 및 기업 상황', create_if_missing=True)
     source_links = [item.get('link') or item.get('originallink') for item in news_items[:12]]
@@ -1751,18 +1997,30 @@ def run_analysis(spreadsheet):
     write_industry_analysis(ws_industry, analysis, source_links)
     print("  ✅ 산업 이해 및 기업 상황 시트 입력 완료")
 
-    # ===== 경쟁 분석 =====
-    print("\n[6/7] 경쟁현황 분석 생성 중...")
+    # ===== 경쟁사 재무 수집 (마스터 시트) =====
+    print("\n[7/8] 경쟁현황 분석 생성 중...")
+    competitor_financials = ''
+    try:
+        ws_master = find_worksheet(spreadsheet, '마스터')
+        master_rows = ws_master.get_all_values()
+        print(f"  마스터 시트 {len(master_rows) - 1}개 기업 재무 수집 중...")
+        competitor_financials = fetch_competitor_financials(master_rows, company_name, current_year)
+        print(f"  ✅ 경쟁사 재무 수집 완료")
+    except Exception as e:
+        print(f"  ⚠️ 마스터 시트 없음 또는 오류 ({e}), 경쟁사 재무 없이 진행")
+
     competition = generate_competition_analysis(
         company_name, stock_code, news_items, financial_summary,
-        report_text=report_text, disclosure_titles=disclosure_titles
+        report_text=report_text[:10000], disclosure_titles=disclosure_titles,
+        competitor_financials=competitor_financials,
+        research_text=research_text,
     )
     ws_competition = find_worksheet(spreadsheet, '경쟁현황', create_if_missing=True)
     write_competition_data(ws_competition, competition, company_name)
     print("  ✅ 경쟁현황 시트 입력 완료")
 
     # ===== 현재가 구하기 시트 =====
-    print("\n[7/7] 현재가 구하기 시트 데이터 수집 중...")
+    print("\n[8/8] 현재가 구하기 시트 데이터 수집 중...")
     try:
         ws_price = find_worksheet(spreadsheet, '현재가 구하기')
         year_bs, reprt_bs, fs_div_bs, bs_data = detect_latest_bs(corp_code)

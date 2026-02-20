@@ -1160,11 +1160,11 @@ def find_worksheet(spreadsheet, canonical_name, create_if_missing=False, rows=20
         elif canonical_name == '경쟁현황':
             ws.update(
                 values=[[
-                    '기업명', '최근 3년 매출', '최근 3년 영업이익', '시장점유율(%)', '순위(국내/글로벌)',
+                    '기업명', '국가', '최근 3년 매출', '최근 3년 영업이익', '시장점유율(%)', '순위(국내/글로벌)',
                     '주요 제품(매출액/비중)', '강점', '약점/리스크', 'CAPEX/증설',
                     '최근 3년 기업활동 뉴스', '뉴스 원본 링크', '투자 고민 포인트', '비고'
                 ]],
-                range_name='A1:M1',
+                range_name='A1:N1',
                 value_input_option='USER_ENTERED'
             )
         print(f"  [안내] '{canonical_name}' 시트가 없어 새로 생성했습니다.")
@@ -1227,7 +1227,7 @@ def apply_competition_sheet_format(ws, row_count):
     requests = [
         {
             'repeatCell': {
-                'range': {'sheetId': ws.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 13},
+                'range': {'sheetId': ws.id, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': 0, 'endColumnIndex': 14},
                 'cell': {
                     'userEnteredFormat': {
                         'backgroundColor': HEADER_BG,
@@ -1244,14 +1244,14 @@ def apply_competition_sheet_format(ws, row_count):
         requests.extend([
             {
                 'repeatCell': {
-                    'range': {'sheetId': ws.id, 'startRowIndex': 1, 'endRowIndex': row_count + 1, 'startColumnIndex': 0, 'endColumnIndex': 8},
+                    'range': {'sheetId': ws.id, 'startRowIndex': 1, 'endRowIndex': row_count + 1, 'startColumnIndex': 0, 'endColumnIndex': 9},
                     'cell': {'userEnteredFormat': {'horizontalAlignment': 'CENTER', 'textFormat': {'bold': True}, 'wrapStrategy': 'WRAP'}},
                     'fields': 'userEnteredFormat(horizontalAlignment,textFormat,wrapStrategy)',
                 }
             },
             {
                 'repeatCell': {
-                    'range': {'sheetId': ws.id, 'startRowIndex': 1, 'endRowIndex': 2, 'startColumnIndex': 0, 'endColumnIndex': 13},
+                    'range': {'sheetId': ws.id, 'startRowIndex': 1, 'endRowIndex': 2, 'startColumnIndex': 0, 'endColumnIndex': 14},
                     'cell': {'userEnteredFormat': {'backgroundColor': HIGHLIGHT_BG}},
                     'fields': 'userEnteredFormat(backgroundColor)',
                 }
@@ -1648,7 +1648,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
   "경쟁사목록": [
     {{
       "기업명": "{company_name}",
-      "구분": "분석대상",
+      "국가": "한국",
       "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
       "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
       "시장점유율(%)": "OO%(추정)",
@@ -1664,7 +1664,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
     }},
     {{
       "기업명": "경쟁사명",
-      "구분": "경쟁사",
+      "국가": "한국 / 미국 / 일본 등",
       "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
       "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
       "시장점유율(%)": "OO%(추정)",
@@ -1906,6 +1906,7 @@ def write_competition_data(ws, competition, company_name):
     for c in sorted_competitors:
         rows.append([
             strip_no_data(c.get('기업명') or ''),
+            strip_no_data(c.get('국가') or c.get('구분') or ''),
             strip_no_data(c.get('최근3년매출액') or ''),
             strip_no_data(c.get('최근3년영업이익') or ''),
             strip_no_data(c.get('시장점유율(%)') or ''),
@@ -1920,8 +1921,8 @@ def write_competition_data(ws, competition, company_name):
             strip_no_data(c.get('비고') or ''),
         ])
 
-    ws.batch_clear(['A2:M2000'])
-    ws.update(values=rows, range_name=f'A2:M{1 + len(rows)}', value_input_option='USER_ENTERED')
+    ws.batch_clear(['A2:N2000'])
+    ws.update(values=rows, range_name=f'A2:N{1 + len(rows)}', value_input_option='USER_ENTERED')
     apply_competition_sheet_format(ws, len(rows))
 
 # =====================================================

@@ -1069,7 +1069,7 @@ def to_multiline_hyperlink_formula(value, label_prefix='원문'):
     for i, url in enumerate(urls, start=1):
         safe_url = str(url).replace('"', '""')
         safe_label = f"{label_prefix}{i}".replace('"', '""')
-        parts.append(f'HYPERLINK("{safe_url}", "{safe_label}")')
+        parts.append(f'HYPERLINK("{safe_url}"; "{safe_label}")')
     return "=" + "&CHAR(10)&".join(parts)
 
 
@@ -1364,7 +1364,7 @@ def fetch_naver_research_reports(company_name, count=3, max_chars_per_report=500
 # OpenAI 분석
 # =====================================================
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=90.0, max_retries=2)
+openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0, max_retries=0)
 OPENAI_MODEL_PRIMARY = 'gpt-5-mini'
 OPENAI_MODEL_FALLBACK = 'gpt-5-nano'
 

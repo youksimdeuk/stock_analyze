@@ -293,6 +293,37 @@ def get_annual_report_text(corp_code, max_chars=20000):
         print(f"  [원문] 예외 발생: {e}")
         return ''
 
+_corp_xml_map = None  # {stock_code: (corp_code, corp_name), ...} + {'name:기업명': corp_code}
+
+
+def _load_corp_xml_map():
+    """DART corpCode.xml을 1회 다운로드하여 모듈 캐시에 저장"""
+    global _corp_xml_map
+    if _corp_xml_map is not None:
+        return _corp_xml_map
+    url = "https://opendart.fss.or.kr/api/corpCode.xml"
+    params = {'crtfc_key': DART_API_KEY}
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    xml_name = next((n for n in zf.namelist() if n.lower().endswith('.xml')), None)
+    if not xml_name:
+        raise RuntimeError("corpCode.xml 내부 XML 파일 없음")
+    xml_text = zf.read(xml_name).decode('utf-8', errors='ignore')
+    root = ET.fromstring(xml_text)
+    m = {}
+    for node in root.findall('list'):
+        sc = (node.findtext('stock_code') or '').strip().zfill(6)
+        cc = (node.findtext('corp_code') or '').strip()
+        cn = (node.findtext('corp_name') or '').strip()
+        if sc and cc:
+            m[sc] = (cc, cn)
+        if cn and cc:
+            m[f'name:{cn}'] = cc
+    _corp_xml_map = m
+    return _corp_xml_map
+
+
 def get_corp_info(stock_code):
     """종목코드로 DART corp_code, 기업명 조회"""
     stock_code = str(stock_code).zfill(6)
@@ -313,7 +344,7 @@ def get_corp_info(stock_code):
             f"message={response_data.get('message')}"
         )
 
-    # company.json 실패 시 corpCode.xml 원본에서 폴백 조회
+    # company.json 실패 시 corpCode.xml 캐시에서 폴백 조회
     corp_code, corp_name = get_corp_info_from_master(stock_code)
     if corp_code:
         print(f"  [폴백성공] corpCode.xml에서 corp_code 조회: {corp_code}")
@@ -323,33 +354,64 @@ def get_corp_info(stock_code):
 
 
 def get_corp_info_from_master(stock_code):
-    """DART corpCode.xml(전체 목록)에서 종목코드로 corp_code 조회"""
-    url = "https://opendart.fss.or.kr/api/corpCode.xml"
-    params = {'crtfc_key': DART_API_KEY}
+    """DART corpCode.xml 캐시에서 종목코드로 corp_code 조회"""
+    target = str(stock_code).zfill(6)
     try:
-        r = requests.get(url, params=params, timeout=30)
-        if r.status_code != 200:
-            print(f"  [오류] corpCode.xml 다운로드 실패: HTTP {r.status_code}")
-            return None, None
-
-        zf = zipfile.ZipFile(io.BytesIO(r.content))
-        xml_name = next((name for name in zf.namelist() if name.lower().endswith('.xml')), None)
-        if not xml_name:
-            print("  [오류] corpCode.xml 내부 XML 파일을 찾지 못했습니다.")
-            return None, None
-
-        xml_text = zf.read(xml_name).decode('utf-8', errors='ignore')
-        root = ET.fromstring(xml_text)
-        target = str(stock_code).zfill(6)
-        for node in root.findall('list'):
-            sc = (node.findtext('stock_code') or '').strip()
-            if sc == target:
-                return (node.findtext('corp_code') or '').strip(), (node.findtext('corp_name') or '').strip()
-
+        m = _load_corp_xml_map()
+        entry = m.get(target)
+        if entry:
+            return entry[0], entry[1]
         print(f"  [오류] corpCode.xml에서 stock_code={target}를 찾지 못했습니다.")
     except Exception as e:
-        print(f"  [오류] corpCode.xml 파싱 실패: {e}")
+        print(f"  [오류] corpCode.xml 조회 실패: {e}")
     return None, None
+
+
+def get_corp_code_by_name(name):
+    """기업명으로 DART corp_code 조회 (정확 일치 → 부분 일치 순)"""
+    norm = re.sub(r'[\s(주)주식회사]', '', name)
+    try:
+        m = _load_corp_xml_map()
+        # 정확 일치
+        key = f'name:{name}'
+        if key in m:
+            return m[key]
+        # 정규화 부분 일치
+        for k, v in m.items():
+            if not k.startswith('name:'):
+                continue
+            corp_norm = re.sub(r'[\s(주)주식회사]', '', k[5:])
+            if norm == corp_norm or (len(norm) >= 2 and (norm in corp_norm or corp_norm in norm)):
+                return v
+    except Exception as e:
+        print(f"  [corp이름조회] {name} 조회 실패: {e}")
+    return None
+
+
+def extract_competitor_names(report_text, news_items, company_name, max_count=5):
+    """사업보고서 + 뉴스에서 주요 경쟁사 기업명 GPT 추출"""
+    news_text = "\n".join([
+        clean_html(item.get('title', ''))
+        for item in news_items[:20]
+    ])
+    prompt = f"""다음 자료에서 '{company_name}'의 주요 경쟁사 기업명을 최대 {max_count}개 추출하세요.
+한국 상장기업 위주로, 공식 기업명으로 작성하세요. 분석 대상 기업 자신은 제외하세요.
+
+■ 사업보고서 (경쟁현황 관련):
+{report_text[:5000]}
+
+■ 최근 뉴스 헤드라인:
+{news_text}
+
+JSON 형식으로만 반환:
+{{"경쟁사": ["기업명1", "기업명2"]}}"""
+    try:
+        result = call_openai_json(prompt, max_completion_tokens=300, task_label='경쟁사추출')
+        names = result.get('경쟁사', [])
+        return [str(n).strip() for n in names if str(n).strip() and str(n).strip() != company_name]
+    except Exception as e:
+        print(f"  [경쟁사추출] 실패: {e}")
+        return []
 
 def get_financial_statements(corp_code, year, reprt_code):
     """DART 재무제표 조회 (연결 우선, 없으면 개별)"""
@@ -1579,7 +1641,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 {news_text if news_text else '[뉴스 없음]'}
 
 위 자료와 학습 지식을 종합하여 분석 대상 기업과 경쟁사를 포함하여 JSON으로 반환하세요.
-- 경쟁사는 사업보고서/뉴스에서 언급된 기업 + 마스터 시트 기업 모두 포함하세요.
+- 경쟁사는 사업보고서/뉴스에서 언급된 기업을 포함하고, DART 재무 데이터가 있는 기업은 해당 수치를 우선 사용하세요.
 - DART 재무 수치는 그대로 사용하고, 없는 항목은 학습 지식으로 적극 채우되 "(추정)" 표기하세요.
 - "[자료 없음]" 표기는 절대 사용하지 마세요. 정말 모르면 빈 문자열("")로 두세요.
 - 뉴스 원본 링크: URL만 줄바꿈 문자열 (하이퍼링크 문구 금지)
@@ -1997,17 +2059,30 @@ def run_analysis(spreadsheet):
     write_industry_analysis(ws_industry, analysis, source_links)
     print("  ✅ 산업 이해 및 기업 상황 시트 입력 완료")
 
-    # ===== 경쟁사 재무 수집 (마스터 시트) =====
+    # ===== 경쟁사 재무 수집 (사업보고서/뉴스 기반) =====
     print("\n[7/8] 경쟁현황 분석 생성 중...")
     competitor_financials = ''
     try:
-        ws_master = find_worksheet(spreadsheet, '마스터')
-        master_rows = ws_master.get_all_values()
-        print(f"  마스터 시트 {len(master_rows) - 1}개 기업 재무 수집 중...")
-        competitor_financials = fetch_competitor_financials(master_rows, company_name, current_year)
-        print(f"  ✅ 경쟁사 재무 수집 완료")
+        competitor_names = extract_competitor_names(report_text, news_items, company_name)
+        if competitor_names:
+            print(f"  경쟁사 {len(competitor_names)}개 식별: {', '.join(competitor_names)}")
+            summaries = []
+            for cname in competitor_names:
+                corp_code_c = get_corp_code_by_name(cname)
+                if not corp_code_c:
+                    print(f"  [경쟁사] {cname}: DART 미등록, 건너뜀 (GPT 보완)")
+                    continue
+                print(f"  [경쟁사] {cname} 재무 수집 중...")
+                summary = fetch_competitor_annual_summary(corp_code_c, cname, current_year)
+                if summary:
+                    summaries.append(summary)
+                time.sleep(0.1)
+            competitor_financials = '\n\n'.join(summaries)
+            print(f"  ✅ 경쟁사 재무 수집 완료 ({len(summaries)}/{len(competitor_names)}개)")
+        else:
+            print(f"  ⚠️ 경쟁사 식별 실패, GPT 학습 지식으로 보완")
     except Exception as e:
-        print(f"  ⚠️ 마스터 시트 없음 또는 오류 ({e}), 경쟁사 재무 없이 진행")
+        print(f"  ⚠️ 경쟁사 재무 수집 오류 ({e}), GPT 학습 지식으로 보완")
 
     competition = generate_competition_analysis(
         company_name, stock_code, news_items, financial_summary,

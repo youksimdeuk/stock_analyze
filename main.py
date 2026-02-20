@@ -799,14 +799,6 @@ def calc_quarter(annual, prev_cum):
     return annual - prev_cum
 
 
-def calc_quarter_q4_safe(fy_cum, q3_cum):
-    """Q4 단일값 계산(보수적): FY-Q3, 단 FY<Q3이면 FY를 그대로 사용"""
-    if fy_cum is None:
-        return None
-    if q3_cum is None:
-        return fy_cum
-    return fy_cum - q3_cum if fy_cum >= q3_cum else fy_cum
-
 
 def detect_fs_sj_by_quarter_logic(corp_code, year):
     """연도별로 분기/반기/3Q/연간 순서로 유효한 fs_div, sj_div 조합 탐색"""
@@ -840,13 +832,15 @@ def fetch_equity_end(corp_code, year, reprt_code, fs_div):
         return None
     return parse_metrics(bs_rows).get('자본총계')
 
-def get_quarterly_metrics(corp_code, year):
+def get_quarterly_metrics(corp_code, year, fs_div=None, sj_div=None):
     """특정 연도의 분기별 재무지표 딕셔너리 반환
     반환: {1: metrics, 2: metrics, 3: metrics, 4: metrics}
+    fs_div/sj_div를 외부에서 전달하면 탐색 API 호출 생략.
     """
     quarters = {}
 
-    fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, year)
+    if fs_div is None or sj_div is None:
+        fs_div, sj_div = detect_fs_sj_by_quarter_logic(corp_code, year)
 
     # 동일 fs/sj 기준으로 Q1, H1, 9M, FY 누적값 조회
     fin = {}
@@ -1855,29 +1849,6 @@ def fetch_competitor_annual_summary(corp_code, name, current_year):
     return f"[{name}]\n" + '\n'.join(year_lines)
 
 
-def fetch_competitor_financials(master_rows, exclude_name, current_year):
-    """마스터 시트(A=기업명, B=종목코드) 기반 경쟁사 재무 요약 수집"""
-    if not master_rows or len(master_rows) < 2:
-        return ''
-    summaries = []
-    for row in master_rows[1:]:  # 1행 헤더 제외
-        if len(row) < 2:
-            continue
-        name = str(row[0]).strip()
-        stock_code = str(row[1]).strip()
-        if not name or not stock_code or name == exclude_name:
-            continue
-        stock_code = stock_code.zfill(6)
-        corp_code, _ = get_corp_info(stock_code)
-        if not corp_code:
-            print(f"  [경쟁사] {name}({stock_code}): corp_code 조회 실패, 건너뜀")
-            continue
-        print(f"  [경쟁사] {name} 재무 수집 중...")
-        summary = fetch_competitor_annual_summary(corp_code, name, current_year)
-        if summary:
-            summaries.append(summary)
-        time.sleep(0.1)
-    return '\n\n'.join(summaries)
 
 _NO_DATA_RE = re.compile(r'^\[.*없음.*\]$|^\[.*없는.*\]$|^\[.*N/?A.*\]$', re.IGNORECASE)
 
@@ -2010,7 +1981,9 @@ def run_analysis(spreadsheet):
     print("\n[2/7] 분기별 재무 데이터 수집 중...")
     for year in range(2020, current_year + 1):
         print(f"  {year}년 분기 데이터 조회 중...")
-        quarterly = get_quarterly_metrics(corp_code, year)
+        # current_year는 이미 탐색된 fs_div/sj_div 재사용 (중복 탐색 방지)
+        kw = {'fs_div': fs_div, 'sj_div': sj_div} if year == current_year else {}
+        quarterly = get_quarterly_metrics(corp_code, year, **kw)
         quarterly_by_year[year] = quarterly
         write_quarterly_data(ws_stock, year, quarterly)
         print(f"  ✅ {year}년 분기 완료")

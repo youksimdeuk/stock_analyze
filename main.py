@@ -922,7 +922,16 @@ def clean_html(text):
 # 주가/시세 관련 제외 키워드
 STOCK_PRICE_KEYWORDS = [
     '주가', '목표주가', '상한가', '하한가', '종가', '시세',
+    '주가상승', '주가하락', '주가급등', '주가급락',
     '주가 상승', '주가 하락', '주가 급등', '주가 급락',
+    '목표가', '적정주가', '주가전망', '주가 전망',
+    '투자의견', '투자 의견', '매수의견', '매도의견',
+    '52주 신고가', '52주 신저가', '52주신고가', '52주신저가',
+    # 주식 시장 맥락의 상승/하락 (단독 '상승'/'하락'은 실적 뉴스와 겹쳐 제외)
+    '급등', '급락',          # 주가 단독 급등/급락 헤드라인
+    '강세', '약세',          # "○○ 강세", "○○ 약세" 시황 기사
+    '신고가', '신저가',      # 52주 외 단독 표현
+    '거래 급증', '거래급증', # 주식 거래량 관련
 ]
 
 DISCLOSURE_NEWS_KEYWORDS = [
@@ -1019,6 +1028,7 @@ def collect_news_items(company_name, min_count=MIN_NEWS_COUNT):
     items = [x for x in items if is_within_last_five_years(x.get('published_dt'))]
     items = [x for x in items if not is_disclosure_news(x)]
     items = filter_stock_price_news(items)
+    items = filter_wrong_company_news(items, company_name)
     items.sort(key=lambda x: x.get('published_dt') or datetime.min, reverse=True)
 
     if len(items) < min_count:
@@ -1026,12 +1036,31 @@ def collect_news_items(company_name, min_count=MIN_NEWS_COUNT):
     return items
 
 
-def to_hyperlink_formula(url, label='원문보기'):
+def _detect_formula_arg_separator(ws):
+    """Detect formula argument separator from spreadsheet locale."""
+    try:
+        meta = ws.spreadsheet.fetch_sheet_metadata(params={'fields': 'properties(locale)'})
+        locale = str((meta.get('properties') or {}).get('locale') or '').strip().lower()
+    except Exception:
+        locale = ''
+
+    if not locale:
+        return ';'
+
+    comma_locales = (
+        'en', 'ja', 'zh', 'th', 'id', 'ms', 'vi', 'hi',
+    )
+    if locale.startswith(comma_locales):
+        return ','
+    return ';'
+
+
+def to_hyperlink_formula(url, label='원문보기', arg_sep=';'):
     if not url:
         return ''
     safe_url = str(url).replace('"', '""')
     safe_label = str(label).replace('"', '""')
-    return f'=HYPERLINK("{safe_url}"; "{safe_label}")'
+    return f'=HYPERLINK("{safe_url}"{arg_sep} "{safe_label}")'
 
 
 def extract_urls(value):
@@ -1061,7 +1090,7 @@ def extract_urls(value):
     return dedup
 
 
-def to_multiline_hyperlink_formula(value, label_prefix='원문'):
+def to_multiline_hyperlink_formula(value, label_prefix='원문', arg_sep=';'):
     urls = extract_urls(value)
     if not urls:
         return ''
@@ -1069,7 +1098,7 @@ def to_multiline_hyperlink_formula(value, label_prefix='원문'):
     for i, url in enumerate(urls, start=1):
         safe_url = str(url).replace('"', '""')
         safe_label = f"{label_prefix}{i}".replace('"', '""')
-        parts.append(f'HYPERLINK("{safe_url}"; "{safe_label}")')
+        parts.append(f'HYPERLINK("{safe_url}"{arg_sep} "{safe_label}")')
     return "=" + "&CHAR(10)&".join(parts)
 
 
@@ -1259,6 +1288,30 @@ def filter_stock_price_news(news_items):
     for item in news_items:
         title = clean_html(item.get('title', ''))
         if any(kw in title for kw in STOCK_PRICE_KEYWORDS):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def filter_wrong_company_news(news_items, company_name):
+    """다른 회사명의 일부로만 등장하는 뉴스 필터링.
+    예: '파인텍' 검색 시 '대성파인텍' 뉴스 제거.
+    company_name 바로 앞 글자가 한글/영문이면 다른 회사명의 suffix로 판단.
+    """
+    if not company_name:
+        return news_items
+    filtered = []
+    escaped = re.escape(company_name)
+    for item in news_items:
+        title = clean_html(item.get('title', ''))
+        match = re.search(escaped, title)
+        if not match:
+            # 제목에 회사명 없음 → 영문 뉴스 등, 유지
+            filtered.append(item)
+            continue
+        start = match.start()
+        # 회사명 바로 앞 글자가 한글/영문이면 다른 회사명의 일부
+        if start > 0 and re.match(r'[가-힣A-Za-z]', title[start - 1]):
             continue
         filtered.append(item)
     return filtered
@@ -1767,6 +1820,7 @@ def write_quarterly_data(ws, year, quarter_metrics):
 
 def write_news_data(ws, news_items, investment_points):
     """뉴스수집 시트에 데이터 쓰기"""
+    arg_sep = _detect_formula_arg_separator(ws)
     rows = []
     for i, item in enumerate(news_items):
         pub_date = format_korean_date(item.get('pubDate', ''))
@@ -1775,7 +1829,7 @@ def write_news_data(ws, news_items, investment_points):
         link = item.get('originallink') or item.get('link') or item.get('url') or ''
         point = investment_points[i] if i < len(investment_points) else ''
         summary = f"{title}\n{desc}".strip()
-        rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크') if link else '', point or '', ''])
+        rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크', arg_sep=arg_sep) if link else '', point or '', ''])
 
     if rows:
         ws.batch_clear(['A2:E2000'])
@@ -1784,6 +1838,7 @@ def write_news_data(ws, news_items, investment_points):
 
 def write_industry_analysis(ws, analysis, source_links):
     """산업 이해 및 기업 상황 시트에 데이터 쓰기"""
+    arg_sep = _detect_formula_arg_separator(ws)
     sections = [
         '산업 개요', '산업 구조 및 특징', '산업 현재 업황', '기업의 해자(경쟁우위)',
         '주요 제품', '주요 제품 설명', '주요 원재료 및 원가 구조',
@@ -1794,7 +1849,7 @@ def write_industry_analysis(ws, analysis, source_links):
     for i, section in enumerate(sections):
         content = strip_no_data(analysis.get(section) or '')
         link = source_links[i] if i < len(source_links) else ''
-        rows.append([section, content, to_hyperlink_formula(link, '근거링크') if link else ''])
+        rows.append([section, content, to_hyperlink_formula(link, '근거링크', arg_sep=arg_sep) if link else ''])
     ws.batch_clear(['A3:C100'])
     ws.update(values=rows, range_name='A3:C14', value_input_option='USER_ENTERED')
     apply_batch_format(ws, [{
@@ -1864,6 +1919,7 @@ def strip_no_data(v):
 
 def write_competition_data(ws, competition, company_name):
     """경쟁현황 시트에 데이터 쓰기"""
+    arg_sep = _detect_formula_arg_separator(ws)
     competitors = competition.get('경쟁사목록', [])
     if not competitors:
         return
@@ -1887,7 +1943,7 @@ def write_competition_data(ws, competition, company_name):
             strip_no_data(c.get('약점/리스크') or ''),
             strip_no_data(c.get('CAPEX/증설') or ''),
             strip_no_data(to_multiline_numbered(c.get('최근3년 기업활동 뉴스'))),
-            to_multiline_hyperlink_formula(c.get('뉴스 원본 링크'), '원문'),
+            to_multiline_hyperlink_formula(c.get('뉴스 원본 링크'), '원문', arg_sep=arg_sep),
             strip_no_data(c.get('투자 고민 포인트') or ''),
             strip_no_data(c.get('비고') or ''),
         ])

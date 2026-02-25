@@ -11,6 +11,11 @@ Google 인증:
 - GOOGLE_CREDENTIALS_PATH / GOOGLE_TOKEN_PATH (파일 경로 사용)
 또는
 - GOOGLE_CREDENTIALS_JSON / GOOGLE_TOKEN_JSON (Secrets 문자열 사용)
+
+WordPress 발행 (선택):
+- WP_URL          예: https://myblog.com
+- WP_USERNAME
+- WP_APP_PASSWORD  Application Password
 """
 
 import os
@@ -39,3 +44,8 @@ GOOGLE_TOKEN_PATH = _getenv("GOOGLE_TOKEN_PATH", "/home/youksimdeuk/token.json")
 # Google Sheets OAuth (Secrets 문자열)
 GOOGLE_CREDENTIALS_JSON = _getenv("GOOGLE_CREDENTIALS_JSON")
 GOOGLE_TOKEN_JSON = _getenv("GOOGLE_TOKEN_JSON")
+
+# WordPress REST API (선택 — 값 없으면 발행 스킵)
+WP_URL          = _getenv("WP_URL")
+WP_USERNAME     = _getenv("WP_USERNAME")
+WP_APP_PASSWORD = _getenv("WP_APP_PASSWORD")

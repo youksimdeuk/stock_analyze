@@ -4,6 +4,7 @@
 - 네이버 뉴스 API: 뉴스 수집
 - OpenAI GPT-5-mini: 내용 분석 및 요약
 - Google Sheets API: 스프레드시트 자동 입력
+- WordPress REST API: 투자 분석글 자동 발행 (선택)
 """
 
 import os
@@ -32,8 +33,11 @@ from config import (
     DART_API_KEY, OPENAI_API_KEY,
     NAVER_CLIENT_ID, NAVER_CLIENT_SECRET,
     GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH,
-    GOOGLE_CREDENTIALS_JSON, GOOGLE_TOKEN_JSON
+    GOOGLE_CREDENTIALS_JSON, GOOGLE_TOKEN_JSON,
+    WP_URL, WP_USERNAME, WP_APP_PASSWORD,
 )
+from wp_content_generator import generate_wp_article
+from wp_publisher import publish_post, get_related_posts, CATEGORY_NAME
 
 # =====================================================
 # 시트 구조 매핑 (주식분석 값 입력)
@@ -481,7 +485,7 @@ def extract_bs_price_data(rows):
         if liab   is None and aid in LIAB_IDS:     liab   = v
         if cash_eq is None and aid in CASH_IDS:    cash_eq = v
         if st_fin is None and any(k in anm for k in ST_FIN_KEYS):  st_fin = v
-        if any(k in anm for k in LONG_DEBT_KEYS):
+        if '장기' in anm and any(k in anm for k in LONG_DEBT_KEYS):
             long_debt_sum += v; long_debt_hit = True
         if nci_equity is None and (aid in NCI_IDS or any(k in anm for k in NCI_KEYS)):
             nci_equity = v
@@ -2052,7 +2056,7 @@ def run_analysis(spreadsheet):
 
     # ===== 증권사 리포트 수집 =====
     print(f"\n[4/8] 증권사 리포트 수집 중... ({company_name})")
-    research_items, research_text = fetch_naver_research_reports(company_name, count=3)
+    research_items, research_text = fetch_naver_research_reports(company_name, count=3, max_chars_per_report=20000)
     if research_items:
         print(f"  ✅ 리포트 {len(research_items)}개 수집 완료")
         news_items = research_items + news_items  # 뉴스수집 시트 상단에 리포트 추가
@@ -2143,6 +2147,57 @@ def run_analysis(spreadsheet):
             print("  ⚠️ BS 데이터를 찾지 못했습니다.")
     except Exception as e:
         print(f"  ⚠️ 현재가 구하기 시트 오류 (시트 없거나 데이터 없음): {e}")
+
+    # ===== [9/9] WordPress 발행 (선택) =====
+    if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
+        print(f"\n[9/9] WordPress 발행 중...")
+        try:
+            # 내부링크 후보 조회
+            related_posts = get_related_posts(CATEGORY_NAME, exclude_title=company_name)
+
+            article = generate_wp_article(
+                company_name           = company_name,
+                stock_code             = stock_code,
+                annual_metrics_by_year = annual_metrics_by_year,
+                analysis               = analysis,
+                competition            = competition,
+                news_items             = news_items,
+                investment_points      = investment_points,
+                quarterly_by_year      = quarterly_by_year,
+                related_posts          = related_posts,
+            )
+            post_url = publish_post(
+                title        = article['title'],
+                content      = article['content'],
+                company_data = {
+                    'company_name':        company_name,
+                    'stock_code':          stock_code,
+                    'annual_financials':   article['annual_financials'],
+                    'quarterly_financials': article['quarterly_financials'],
+                },
+                seo_data = {
+                    'seo_title':        article.get('seo_title', ''),
+                    'meta_description': article.get('meta_description', ''),
+                    'focus_keyword':    article.get('focus_keyword', ''),
+                    'slug':             article.get('slug', ''),
+                    'tags':             article.get('tags', []),
+                },
+            )
+            # corp_map D2:E2에 발행일·URL 기록
+            from datetime import datetime as _dt
+            today = _dt.now().strftime('%Y-%m-%d')
+            ws_corp_map.update(
+                values=[[today, post_url]],
+                range_name='D2:E2',
+                value_input_option='USER_ENTERED',
+            )
+            print(f"  ✅ WordPress 발행 완료: {post_url}")
+            print(f"  포커스 키워드: {article.get('focus_keyword', '-')}")
+            print(f"  슬러그: {article.get('slug', '-')}")
+        except Exception as e:
+            print(f"  ⚠️ WordPress 발행 실패 (분석은 정상 완료됨): {e}")
+    else:
+        print("\n[9/9] WordPress 설정 없음 — 발행 스킵")
 
     print("\n" + "=" * 50)
     print(f"✅ {company_name} 분석 완료!")

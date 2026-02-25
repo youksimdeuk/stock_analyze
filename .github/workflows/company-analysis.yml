@@ -34,6 +34,9 @@ jobs:
       GOOGLE_TOKEN_PATH: token.json
       TARGET_SPREADSHEET_ID: ${{ github.event.inputs.target_spreadsheet_id }}
       FORCE_REANALYZE: ${{ github.event.inputs.force_reanalyze }}
+      WP_URL: ${{ secrets.WP_URL }}
+      WP_USERNAME: ${{ secrets.WP_USERNAME }}
+      WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
 
     steps:
       - name: Checkout

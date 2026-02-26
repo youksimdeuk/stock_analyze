@@ -617,7 +617,7 @@ def generate_wp_article(company_name, stock_code, annual_metrics_by_year,
             },
             {'role': 'user', 'content': prompt}
         ],
-        max_tokens=16000,
+        max_completion_tokens=16000,
         temperature=0.4,
     )
 

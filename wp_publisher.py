@@ -144,6 +144,17 @@ def _build_financial_table_html(annual_financials):
 # 분기 실적 테이블 HTML 생성
 # =====================================================
 
+def _fmt_q(val, is_pct=False):
+    """분기 데이터 전용 포맷 — 이미 억원/% 변환된 값을 그대로 출력"""
+    if val is None:
+        return '-'
+    try:
+        v = float(val)
+        return f"{v:.1f}%" if is_pct else f"{v:,.1f}"
+    except (TypeError, ValueError):
+        return '-'
+
+
 def _build_quarterly_table_html(quarterly_financials):
     """분기 실적 데이터 → HTML 테이블 (최신순)"""
     if not quarterly_financials:
@@ -175,10 +186,10 @@ def _build_quarterly_table_html(quarterly_financials):
         tbody_rows.append(
             f'<tr style="{row_bg}">'
             f'<td style="{td0_style}">{분기}</td>'
-            f'<td style="{td_style}">{_fmt_eok(q.get("매출액"))}</td>'
-            f'<td style="{td_style}">{_fmt_eok(q.get("영업이익"))}</td>'
-            f'<td style="{td_style}">{_fmt_pct(q.get("영업이익률"))}</td>'
-            f'<td style="{td_style}">{_fmt_eok(q.get("당기순이익"))}</td>'
+            f'<td style="{td_style}">{_fmt_q(q.get("매출액억원"))}</td>'
+            f'<td style="{td_style}">{_fmt_q(q.get("영업이익억원"))}</td>'
+            f'<td style="{td_style}">{_fmt_q(q.get("영업이익률pct"), is_pct=True)}</td>'
+            f'<td style="{td_style}">{_fmt_q(q.get("당기순이익억원"))}</td>'
             f'</tr>'
         )
     tbody = f'<tbody>{"".join(tbody_rows)}</tbody>'

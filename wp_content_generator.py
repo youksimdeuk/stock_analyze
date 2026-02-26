@@ -618,7 +618,6 @@ def generate_wp_article(company_name, stock_code, annual_metrics_by_year,
             {'role': 'user', 'content': prompt}
         ],
         max_completion_tokens=16000,
-        temperature=0.4,
     )
 
     full_text = response.choices[0].message.content.strip()

@@ -10,7 +10,7 @@ from html import unescape
 from openai import OpenAI
 from config import OPENAI_API_KEY
 
-ARTICLE_MODEL = 'gpt-4o-mini'
+ARTICLE_MODEL = 'gpt-5-mini'
 QUARTERLY_MAX = 8
 
 _client = None

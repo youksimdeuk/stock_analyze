@@ -49,3 +49,8 @@ GOOGLE_TOKEN_JSON = _getenv("GOOGLE_TOKEN_JSON")
 WP_URL          = _getenv("WP_URL")
 WP_USERNAME     = _getenv("WP_USERNAME")
 WP_APP_PASSWORD = _getenv("WP_APP_PASSWORD")
+
+# 발행 완료 알림 Webhook (선택 — Slack 또는 Discord, 값 없으면 스킵)
+# Slack:   https://hooks.slack.com/services/...
+# Discord: https://discord.com/api/webhooks/...
+PUBLISH_WEBHOOK_URL = _getenv("PUBLISH_WEBHOOK_URL")

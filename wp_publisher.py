@@ -4,6 +4,8 @@ wp_publisher.py — WordPress REST API 포스트 발행
 """
 
 import base64
+import json
+import re
 import requests
 from requests.auth import HTTPBasicAuth
 from config import WP_URL, WP_USERNAME, WP_APP_PASSWORD
@@ -137,6 +139,86 @@ def _build_financial_table_html(annual_financials):
         f'<caption style="{caption_style}">▶ 연간 재무 실적 요약 (단위: 억원)</caption>'
         f'{thead}{tbody}'
         f'</table>'
+    )
+
+
+# =====================================================
+# 재무건전성 미니 지표 카드 (ROE + FCF)
+# =====================================================
+
+def _build_health_indicators_html(annual_financials):
+    """ROE(%) + FCF(= OCF - CAPEX, 억원) 3~5년 추이 미니 카드"""
+    if not annual_financials:
+        return ''
+    years = sorted(annual_financials.keys())
+
+    def _roe(m):
+        v = m.get('ROE')
+        if v is None:
+            return None
+        try:
+            return float(v) * 100
+        except (TypeError, ValueError):
+            return None
+
+    def _fcf(m):
+        ocf  = m.get('영업활동현금흐름')
+        capex = m.get('CAPEX')
+        if ocf is None or capex is None:
+            return None
+        try:
+            return (float(ocf) - float(capex)) / 1e8
+        except (TypeError, ValueError):
+            return None
+
+    def _color(val, positive_good=True):
+        if val is None:
+            return '#6b7280'
+        return '#16a34a' if (val >= 0) == positive_good else '#dc2626'
+
+    def _fmt_roe(val):
+        return f'{val:.1f}%' if val is not None else '-'
+
+    def _fmt_fcf(val):
+        if val is None:
+            return '-'
+        return f'{val:+,.0f}'
+
+    roe_vals = [_roe(annual_financials.get(y, {})) for y in years]
+    fcf_vals = [_fcf(annual_financials.get(y, {})) for y in years]
+
+    # 모두 None이면 카드 생성 안 함
+    if all(v is None for v in roe_vals) and all(v is None for v in fcf_vals):
+        return ''
+
+    th_s = 'padding:6px 12px;text-align:center;font-size:12px;color:#fff;background:#374151;border:1px solid #d1d5db;'
+    td0_s = 'padding:6px 12px;font-size:12px;font-weight:600;color:#374151;background:#f9fafb;border:1px solid #d1d5db;'
+    td_s  = 'padding:6px 12px;text-align:right;font-size:13px;font-weight:700;border:1px solid #d1d5db;'
+
+    year_headers = ''.join(f'<th style="{th_s}">{y}년</th>' for y in years)
+
+    roe_cells = ''.join(
+        f'<td style="{td_s}color:{_color(v)};">{_fmt_roe(v)}</td>'
+        for v in roe_vals
+    )
+    fcf_cells = ''.join(
+        f'<td style="{td_s}color:{_color(v)};">{_fmt_fcf(v)}</td>'
+        for v in fcf_vals
+    )
+
+    return (
+        '<div style="margin:16px 0 24px 0;">'
+        '<p style="font-weight:700;font-size:13px;color:#374151;margin:0 0 6px 0;">'
+        '▶ 재무건전성 지표</p>'
+        f'<table style="border-collapse:collapse;font-size:13px;">'
+        f'<thead><tr><th style="{th_s}">지표</th>{year_headers}</tr></thead>'
+        f'<tbody>'
+        f'<tr><td style="{td0_s}">ROE (%)</td>{roe_cells}</tr>'
+        f'<tr><td style="{td0_s}">FCF (억원)</td>{fcf_cells}</tr>'
+        f'</tbody></table>'
+        '<p style="font-size:11px;color:#9ca3af;margin:4px 0 0 0;">'
+        'FCF = 영업활동현금흐름 − CAPEX. 양수(초록)·음수(빨강).</p>'
+        '</div>'
     )
 
 
@@ -497,6 +579,70 @@ def _build_quarterly_svg_chart(quarterly_financials, company_name=''):
 # =====================================================
 # HTML 콘텐츠에 재무 테이블/차트 주입 (GPT HTML 출력용)
 # =====================================================
+# 목차 앵커 자동 연결
+# =====================================================
+
+def _slugify_heading(text):
+    """H2 텍스트에서 앵커용 id 문자열 생성 (한글 포함 그대로 사용)"""
+    text = re.sub(r'<[^>]+>', '', text).strip()
+    text = re.sub(r'[^\w\s\-가-힣ㄱ-ㅎㅏ-ㅣ]', '', text)
+    text = re.sub(r'\s+', '-', text)
+    return text[:60] or 'section'
+
+
+def _inject_anchors(html):
+    """H2에 id 부여 + 첫 번째 목차 ul의 li에 앵커 href 연결"""
+    # ── H2 id 부여 ──────────────────────────────────
+    h2_pattern = re.compile(r'<h2([^>]*)>(.*?)</h2>', re.DOTALL)
+    slugs = []   # [(h2_text, slug), ...]
+    used = set()
+
+    def add_id(m):
+        attrs, inner = m.group(1), m.group(2)
+        raw = re.sub(r'<[^>]+>', '', inner).strip()
+        base = _slugify_heading(raw)
+        slug, n = base, 1
+        while slug in used:
+            slug = f'{base}-{n}'; n += 1
+        used.add(slug)
+        slugs.append((raw, slug))
+        if 'id=' in attrs:
+            attrs = re.sub(r'\bid=["\'][^"\']*["\']', f'id="{slug}"', attrs)
+        else:
+            attrs = f' id="{slug}"' + attrs
+        return f'<h2{attrs}>{inner}</h2>'
+
+    html = h2_pattern.sub(add_id, html)
+    if not slugs:
+        return html
+
+    # ── 목차 ul li에 href 연결 ───────────────────────
+    def linkify_li(li_m):
+        inner = li_m.group(1)
+        if '<a ' in inner:          # 이미 링크 있으면 스킵
+            return li_m.group(0)
+        li_text = re.sub(r'<[^>]+>', '', inner).strip()
+        best_slug, best_score = None, 0.0
+        for h2_text, slug in slugs:
+            if not li_text or not h2_text:
+                continue
+            score = (len(set(li_text) & set(h2_text)) /
+                     max(len(set(li_text) | set(h2_text)), 1))
+            if score > best_score:
+                best_score, best_slug = score, slug
+        if best_slug and best_score >= 0.35:
+            return f'<li><a href="#{best_slug}">{inner}</a></li>'
+        return li_m.group(0)
+
+    first_ul = re.search(r'<ul>(.*?)</ul>', html, re.DOTALL)
+    if first_ul:
+        new_ul = re.sub(r'<li>(.*?)</li>', linkify_li, first_ul.group(1), flags=re.DOTALL)
+        html = html[:first_ul.start(1)] + new_ul + html[first_ul.end(1):]
+
+    return html
+
+
+# =====================================================
 
 def _inject_visuals_html(html_content, annual_financials, company_name, quarterly_financials=None):
     """
@@ -504,11 +650,12 @@ def _inject_visuals_html(html_content, annual_financials, company_name, quarterl
     연간 재무 테이블 + SVG 차트 + 분기 SVG 차트 + 분기 실적 테이블을 삽입합니다.
     """
     import re
-    table_html          = _build_financial_table_html(annual_financials)
-    chart_html          = _build_svg_chart(annual_financials, company_name)
+    table_html           = _build_financial_table_html(annual_financials)
+    chart_html           = _build_svg_chart(annual_financials, company_name)
+    health_html          = _build_health_indicators_html(annual_financials)
     quarterly_chart_html = _build_quarterly_svg_chart(quarterly_financials or [], company_name)
-    quarterly_html      = _build_quarterly_table_html(quarterly_financials or [])
-    visuals = table_html + chart_html + quarterly_chart_html + quarterly_html
+    quarterly_html       = _build_quarterly_table_html(quarterly_financials or [])
+    visuals = table_html + chart_html + health_html + quarterly_chart_html + quarterly_html
 
     if not visuals:
         return html_content
@@ -665,6 +812,72 @@ def get_related_posts(category_name, exclude_title='', max_count=5):
 
 
 # =====================================================
+# 중복 발행 방지
+# =====================================================
+
+def find_existing_post(company_name):
+    """
+    동일 기업명이 제목에 포함된 draft/published 포스트 조회.
+    반환: (post_id, post_url, status) 또는 (None, None, None)
+    """
+    try:
+        for status in ('draft', 'publish'):
+            r = requests.get(
+                _api('posts'),
+                params={
+                    'search':   company_name,
+                    'status':   status,
+                    'per_page': 5,
+                    '_fields':  'id,title,link,status',
+                },
+                auth=_auth(), timeout=10,
+            )
+            r.raise_for_status()
+            for post in r.json():
+                raw = post.get('title', {})
+                title = raw.get('rendered', '') if isinstance(raw, dict) else str(raw)
+                if company_name in title:
+                    return post['id'], post.get('link', ''), post.get('status', status)
+    except Exception as e:
+        print(f"  [중복체크] 조회 실패 (무시): {e}")
+    return None, None, None
+
+
+# =====================================================
+# FAQ Schema JSON-LD
+# =====================================================
+
+def _build_faq_schema_ld(faq_json_str):
+    """FAQ_JSON 문자열에서 Schema.org FAQPage JSON-LD 스크립트 블록 생성"""
+    if not faq_json_str:
+        return ''
+    try:
+        items = json.loads(faq_json_str)
+        if not isinstance(items, list) or not items:
+            return ''
+    except (json.JSONDecodeError, ValueError):
+        return ''
+    entities = []
+    for item in items:
+        q = str(item.get('question', '')).strip()
+        a = str(item.get('answer', '')).strip()
+        if q and a:
+            entities.append({
+                '@type': 'Question',
+                'name': q,
+                'acceptedAnswer': {'@type': 'Answer', 'text': a},
+            })
+    if not entities:
+        return ''
+    schema = {
+        '@context': 'https://schema.org',
+        '@type': 'FAQPage',
+        'mainEntity': entities,
+    }
+    return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>\n'
+
+
+# =====================================================
 # 발행
 # =====================================================
 
@@ -705,6 +918,16 @@ def publish_post(title, content, company_data, seo_data=None):
         print("  마크다운 → HTML 변환 + 테이블/차트 삽입 중...")
         wp_content = _md_to_html(content, annual_financials, company_name)
 
+    # 목차 앵커 연결 (H2 id 부여 + 목차 li href)
+    wp_content = _inject_anchors(wp_content)
+
+    # FAQ Schema JSON-LD 본문 앞 주입
+    faq_json_str = seo_data.get('faq_json', '')
+    schema_ld = _build_faq_schema_ld(faq_json_str)
+    if schema_ld:
+        wp_content = schema_ld + wp_content
+        print("  FAQ Schema JSON-LD 주입 완료")
+
     # SEO 필드
     meta_description = seo_data.get('meta_description', '')
     focus_keyword    = seo_data.get('focus_keyword', '')
@@ -727,20 +950,32 @@ def publish_post(title, content, company_data, seo_data=None):
             'rank_math_focus_keyword':  focus_keyword,
         }
 
-    print("  WP 포스트 생성 중 (임시저장 + SEO)...")
-    r = requests.post(
-        _api('posts'),
-        json=post_body,
-        auth=_auth(),
-        timeout=30,
-    )
+    # 중복 체크: 기존 draft/published 포스트가 있으면 UPDATE, 없으면 CREATE
+    existing_id, existing_url, existing_status = find_existing_post(company_name)
+    if existing_id:
+        print(f"  ⚠️ 기존 {existing_status} 포스트 발견 (ID={existing_id}) → 업데이트")
+        r = requests.patch(
+            _api(f'posts/{existing_id}'),
+            json=post_body,
+            auth=_auth(),
+            timeout=30,
+        )
+    else:
+        print("  WP 포스트 생성 중 (임시저장 + SEO)...")
+        r = requests.post(
+            _api('posts'),
+            json=post_body,
+            auth=_auth(),
+            timeout=30,
+        )
     r.raise_for_status()
 
     data     = r.json()
     post_id  = data.get('id')
     post_url = data.get('link', '')
 
-    print(f"  WP 포스트 생성 완료: ID={post_id}, URL={post_url}")
+    action = "업데이트" if existing_id else "생성"
+    print(f"  WP 포스트 {action} 완료: ID={post_id}, URL={post_url}")
     if slug:
         print(f"  슬러그: {slug}")
     if meta_description:

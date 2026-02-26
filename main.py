@@ -35,9 +35,26 @@ from config import (
     GOOGLE_CREDENTIALS_PATH, GOOGLE_TOKEN_PATH,
     GOOGLE_CREDENTIALS_JSON, GOOGLE_TOKEN_JSON,
     WP_URL, WP_USERNAME, WP_APP_PASSWORD,
+    PUBLISH_WEBHOOK_URL,
 )
 from wp_content_generator import generate_wp_article
 from wp_publisher import publish_post, get_related_posts, CATEGORY_NAME
+
+
+def _send_publish_notification(company_name, focus_keyword, post_url):
+    """발행 완료 시 Slack/Discord Webhook 알림 (PUBLISH_WEBHOOK_URL 없으면 스킵)"""
+    if not PUBLISH_WEBHOOK_URL:
+        return
+    try:
+        msg = f"[기업분석] {company_name} 발행 완료\n키워드: {focus_keyword}\nURL: {post_url}"
+        if 'discord.com' in PUBLISH_WEBHOOK_URL:
+            payload = {'content': msg}
+        else:
+            payload = {'text': msg}
+        requests.post(PUBLISH_WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        print(f"  [알림] Webhook 전송 실패 (무시): {e}")
+
 
 # =====================================================
 # 시트 구조 매핑 (주식분석 값 입력)
@@ -410,7 +427,7 @@ def extract_competitor_names(report_text, news_items, company_name, max_count=5)
 JSON 형식으로만 반환:
 {{"경쟁사": ["기업명1", "기업명2"]}}"""
     try:
-        result = call_openai_json(prompt, max_completion_tokens=300, task_label='경쟁사추출')
+        result = call_openai_json(prompt, max_completion_tokens=2000, task_label='경쟁사추출')
         names = result.get('경쟁사', [])
         return [str(n).strip() for n in names if str(n).strip() and str(n).strip() != company_name]
     except Exception as e:
@@ -2181,6 +2198,7 @@ def run_analysis(spreadsheet):
                     'focus_keyword':    article.get('focus_keyword', ''),
                     'slug':             article.get('slug', ''),
                     'tags':             article.get('tags', []),
+                    'faq_json':         article.get('faq_json', ''),
                 },
             )
             # corp_map D2:E2에 발행일·URL 기록
@@ -2194,6 +2212,7 @@ def run_analysis(spreadsheet):
             print(f"  ✅ WordPress 발행 완료: {post_url}")
             print(f"  포커스 키워드: {article.get('focus_keyword', '-')}")
             print(f"  슬러그: {article.get('slug', '-')}")
+            _send_publish_notification(company_name, article.get('focus_keyword', ''), post_url)
         except Exception as e:
             print(f"  ⚠️ WordPress 발행 실패 (분석은 정상 완료됨): {e}")
     else:

@@ -448,6 +448,102 @@ def _remove_all_meta_blocks(text):
     return text.strip()
 
 
+def _extract_faq_from_html(html):
+    """기존 FAQ HTML에서 Q/A 쌍 역추출 (FAQ_JSON 없을 때 fallback)"""
+    items = []
+    # 패턴 1: <dt>...</dt><dd>...</dd>
+    for q, a in re.findall(r'<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>', html, re.DOTALL):
+        q_text = re.sub(r'^Q[\.\:\s]+', '', re.sub(r'<[^>]+>', '', q).strip()).strip()
+        a_text = re.sub(r'^A[\.\:\s]+', '', re.sub(r'<[^>]+>', '', a).strip()).strip()
+        if q_text and a_text:
+            items.append({'question': q_text, 'answer': a_text})
+    if items:
+        return items
+    # 패턴 2: Q./A. p 태그 패턴
+    pending_q = None
+    for chunk in re.split(r'(?=<p[^>]*>)', html):
+        text = re.sub(r'<[^>]+>', '', chunk).strip()
+        if re.match(r'^Q[\.\:\s]', text):
+            pending_q = re.sub(r'^Q[\.\:\s]+', '', text).strip()
+        elif re.match(r'^A[\.\:\s]', text) and pending_q:
+            items.append({'question': pending_q, 'answer': re.sub(r'^A[\.\:\s]+', '', text).strip()})
+            pending_q = None
+    return items
+
+
+def _build_faq_cards_html(items):
+    """Q/A 쌍 리스트에서 카드 스타일 HTML 생성"""
+    if not items:
+        return ''
+    cards = []
+    for item in items:
+        q = str(item.get('question', '')).strip()
+        a = str(item.get('answer', '')).strip()
+        if not q or not a:
+            continue
+        cards.append(
+            '<div style="border-left:4px solid #2563eb;border-radius:0 8px 8px 0;'
+            'padding:14px 18px;margin:12px 0;background:#f8faff;'
+            'box-shadow:0 1px 3px rgba(0,0,0,0.06);">'
+            '<p style="font-weight:700;color:#1e3a6e;margin:0 0 6px 0;font-size:15px;">'
+            '<span style="background:#2563eb;color:#fff;border-radius:4px;'
+            'padding:1px 8px;font-size:12px;font-weight:700;margin-right:8px;">Q</span>'
+            f'{q}</p>'
+            f'<p style="color:#374151;margin:0;font-size:14px;line-height:1.8;'
+            f'padding-left:28px;">{a}</p>'
+            '</div>'
+        )
+    return '\n'.join(cards)
+
+
+def _inject_faq_cards(content, faq_json_str):
+    """본문 FAQ 섹션을 카드 HTML로 교체 (FAQ_JSON 우선, HTML 역추출 fallback)"""
+    # H2 찾기: 자주 묻는 질문 / FAQ / Q&A 변형 모두 커버
+    h2_match = re.search(
+        r'<h2[^>]*>[^<]*(자주\s*묻는\s*질문|FAQ|Q&amp;A|Q&A)[^<]*</h2>',
+        content, re.IGNORECASE
+    )
+    if not h2_match:
+        print('  [FAQ주입] FAQ H2 없음 — 건너뜀')
+        return content
+
+    faq_start = h2_match.end()
+    tail = content[faq_start:]
+    next_h2 = re.search(r'<h2', tail, re.IGNORECASE)
+    disclaimer = re.search(r'<p[^>]*class=["\']disclaimer["\']', tail, re.IGNORECASE)
+    ends = []
+    if next_h2:
+        ends.append(next_h2.start())
+    if disclaimer:
+        ends.append(disclaimer.start())
+    faq_end = faq_start + min(ends) if ends else len(content)
+    faq_section_html = content[faq_start:faq_end]
+
+    # FAQ 아이템 파싱: FAQ_JSON 우선 → HTML 역추출 fallback
+    items = []
+    if faq_json_str:
+        try:
+            parsed = json.loads(faq_json_str)
+            if isinstance(parsed, list):
+                items = parsed
+        except (json.JSONDecodeError, ValueError):
+            pass
+    if not items:
+        items = _extract_faq_from_html(faq_section_html)
+        if items:
+            print(f'  [FAQ주입] FAQ_JSON 없음 → HTML 역추출 fallback ({len(items)}개)')
+        else:
+            print('  [FAQ주입] FAQ 추출 실패 — 원본 유지')
+            return content
+
+    cards_html = _build_faq_cards_html(items)
+    if not cards_html:
+        return content
+
+    print(f'  [FAQ주입] 카드 {len(items)}개 주입 완료')
+    return content[:faq_start] + '\n' + cards_html + '\n' + content[faq_end:]
+
+
 def _fallback_meta_description(company_name, stock_code, content):
     """SEO_DESCRIPTION이 없을 때 자동 생성"""
     for line in content.split('\n'):
@@ -521,7 +617,7 @@ def generate_wp_article(company_name, stock_code, annual_metrics_by_year,
             },
             {'role': 'user', 'content': prompt}
         ],
-        max_tokens=10000,
+        max_tokens=16000,
         temperature=0.4,
     )
 
@@ -538,6 +634,9 @@ def generate_wp_article(company_name, stock_code, annual_metrics_by_year,
 
     # 본문에서 메타 블록 제거
     content = _remove_all_meta_blocks(full_text)
+
+    # FAQ 섹션을 카드 HTML로 교체 (FAQ_JSON 우선, HTML 역추출 fallback)
+    content = _inject_faq_cards(content, faq_json)
 
     # 태그 리스트 파싱
     tags = [t.strip() for t in tags_raw.split(',') if t.strip()] if tags_raw else [

@@ -22,7 +22,7 @@ concurrency:
 jobs:
   run-analysis:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -37,6 +37,7 @@ jobs:
       WP_URL: ${{ secrets.WP_URL }}
       WP_USERNAME: ${{ secrets.WP_USERNAME }}
       WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+      PUBLISH_WEBHOOK_URL: ${{ secrets.PUBLISH_WEBHOOK_URL }}
 
     steps:
       - name: Checkout

@@ -317,9 +317,14 @@ JSON에 없는 정보는 단정하지 말 것.
 - 다음 분기 관찰 포인트 3~5개
 
 <h2>자주 묻는 질문(FAQ)</h2>
-FAQ 6~8개
-각 답변 2~3문장 (dl/dt/dd 형식 또는 h3/p 형식)
-조건/변수 1개 포함
+FAQ 6~8개. 아래 HTML 구조를 그대로 사용하라 (스타일 속성 유지, 내용만 교체):
+
+<div style="border:1px solid #dce8f5;border-radius:8px;padding:16px 20px;margin:10px 0;background:#f7fbff;">
+<p style="font-weight:bold;color:#1a3a5c;margin:0 0 8px 0;font-size:15px;">Q. [질문]</p>
+<p style="color:#333;margin:0;font-size:14px;line-height:1.75;">A. [답변 2~3문장. 조건/변수 1개 포함]</p>
+</div>
+
+위 div 블록을 FAQ 개수만큼 반복 출력한다.
 
 면책 고지 (마지막 줄):
 <p class="disclaimer">※ 본 글은 공개된 재무 데이터를 기반으로 작성한 참고 자료이며, 투자 권유가 아닙니다. 투자 결정은 반드시 본인의 판단과 책임 하에 이루어져야 합니다.</p>

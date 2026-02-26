@@ -366,19 +366,149 @@ def _build_svg_chart(annual_financials, company_name=''):
 
 
 # =====================================================
+# 분기 SVG 차트 생성
+# =====================================================
+
+def _build_quarterly_svg_chart(quarterly_financials, company_name=''):
+    """
+    분기 실적 데이터로 SVG 차트 생성 (매출액·영업이익 막대 + 영업이익률 꺾은선).
+    quarterly_financials는 최신순 리스트 → 시간순으로 역전하여 표시.
+    값은 이미 억원/% 단위.
+    """
+    if not quarterly_financials:
+        return ''
+
+    items = list(reversed(quarterly_financials))  # 시간순 정렬
+    n = len(items)
+
+    def safe_f(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    labels     = [q.get('분기', '-') for q in items]
+    revenues   = [safe_f(q.get('매출액억원'))   for q in items]
+    op_profits = [safe_f(q.get('영업이익억원')) for q in items]
+    op_margins = [safe_f(q.get('영업이익률pct')) for q in items]  # 이미 %
+
+    W, H         = 640, 300
+    pad_l, pad_r = 72, 65
+    pad_t, pad_b = 40, 50
+    cw = W - pad_l - pad_r
+    ch = H - pad_t - pad_b
+
+    max_bar = max(revenues + op_profits + [1]) * 1.15
+    max_pct = max(abs(m) for m in op_margins + [1]) * 1.3
+
+    bar_group_w = cw / n
+    bw = bar_group_w * 0.30
+
+    elems = []
+
+    # 배경
+    elems.append(f'<rect x="{pad_l}" y="{pad_t}" width="{cw}" height="{ch}" fill="#fafafa" rx="4"/>')
+
+    # 그리드 (5개)
+    for i in range(6):
+        frac = i / 5
+        gy   = pad_t + ch * (1 - frac)
+        val  = max_bar * frac
+        elems.append(f'<line x1="{pad_l}" y1="{gy:.1f}" x2="{pad_l+cw}" y2="{gy:.1f}" stroke="#e0e0e0" stroke-width="1"/>')
+        elems.append(f'<text x="{pad_l-6}" y="{gy+4:.1f}" text-anchor="end" font-size="10" fill="#888">{val:,.0f}</text>')
+        pval = max_pct * frac
+        elems.append(f'<text x="{pad_l+cw+6}" y="{gy+4:.1f}" text-anchor="start" font-size="10" fill="#c0392b">{pval:.1f}%</text>')
+
+    # 막대 + 분기 레이블
+    for i, label in enumerate(labels):
+        xc = pad_l + (i + 0.5) * bar_group_w
+
+        # 매출액 막대
+        rev = revenues[i]
+        rh  = (rev / max_bar) * ch if max_bar > 0 else 0
+        rx  = xc - bw - 2
+        ry  = pad_t + ch - rh
+        elems.append(f'<rect x="{rx:.1f}" y="{ry:.1f}" width="{bw:.1f}" height="{rh:.1f}" fill="#1a3a5c" rx="2"/>')
+
+        # 영업이익 막대 (양수만)
+        op = op_profits[i]
+        if op > 0:
+            oh = (op / max_bar) * ch if max_bar > 0 else 0
+            ox = xc + 2
+            oy = pad_t + ch - oh
+            elems.append(f'<rect x="{ox:.1f}" y="{oy:.1f}" width="{bw:.1f}" height="{oh:.1f}" fill="#3498db" rx="2"/>')
+
+        # 분기 레이블 (짧게 표시: 2023Q1 → 23Q1)
+        short_label = label[2:] if len(label) >= 6 else label
+        elems.append(
+            f'<text x="{xc:.1f}" y="{H-10}" text-anchor="middle" '
+            f'font-size="9" fill="#444">{short_label}</text>'
+        )
+
+    # 영업이익률 꺾은선
+    margin_pts = []
+    for i, m in enumerate(op_margins):
+        xc = pad_l + (i + 0.5) * bar_group_w
+        my = pad_t + ch * (1 - m / max_pct) if max_pct > 0 else pad_t + ch
+        margin_pts.append((xc, my, m))
+
+    if len(margin_pts) > 1:
+        polyline = ' '.join(f'{x:.1f},{y:.1f}' for x, y, _ in margin_pts)
+        elems.append(f'<polyline points="{polyline}" fill="none" stroke="#e74c3c" stroke-width="2.5" stroke-linejoin="round"/>')
+    for xc, my, m in margin_pts:
+        elems.append(f'<circle cx="{xc:.1f}" cy="{my:.1f}" r="4" fill="#e74c3c" stroke="#fff" stroke-width="1.5"/>')
+        elems.append(f'<text x="{xc:.1f}" y="{my-8:.1f}" text-anchor="middle" font-size="9" fill="#c0392b">{m:.1f}%</text>')
+
+    # 축
+    elems.append(f'<line x1="{pad_l}" y1="{pad_t}" x2="{pad_l}" y2="{pad_t+ch}" stroke="#bbb" stroke-width="1.5"/>')
+    elems.append(f'<line x1="{pad_l}" y1="{pad_t+ch}" x2="{pad_l+cw}" y2="{pad_t+ch}" stroke="#bbb" stroke-width="1.5"/>')
+
+    # 범례
+    ly = 14
+    elems += [
+        f'<rect x="{pad_l}" y="{ly}" width="12" height="12" fill="#1a3a5c" rx="2"/>',
+        f'<text x="{pad_l+15}" y="{ly+10}" font-size="11" fill="#333">매출액(억원)</text>',
+        f'<rect x="{pad_l+95}" y="{ly}" width="12" height="12" fill="#3498db" rx="2"/>',
+        f'<text x="{pad_l+110}" y="{ly+10}" font-size="11" fill="#333">영업이익(억원)</text>',
+        f'<line x1="{pad_l+205}" y1="{ly+6}" x2="{pad_l+218}" y2="{ly+6}" stroke="#e74c3c" stroke-width="2.5"/>',
+        f'<circle cx="{pad_l+211}" cy="{ly+6}" r="3.5" fill="#e74c3c"/>',
+        f'<text x="{pad_l+222}" y="{ly+10}" font-size="11" fill="#c0392b">영업이익률(%)</text>',
+    ]
+
+    svg_inner = '\n  '.join(elems)
+    svg_str = (
+        f'<svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
+        f'xmlns="http://www.w3.org/2000/svg">'
+        f'\n  {svg_inner}\n'
+        f'</svg>'
+    )
+    svg_b64  = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
+    alt_text = f"{company_name} 분기별 매출·영업이익·영업이익률 추이" if company_name else "분기 실적 차트"
+    return (
+        f'<div style="margin:24px 0;">'
+        f'<p style="font-weight:bold;font-size:15px;color:#2c5f8a;margin-bottom:8px;">'
+        f'▶ 분기별 매출액·영업이익 추이 및 영업이익률</p>'
+        f'<img src="data:image/svg+xml;base64,{svg_b64}" '
+        f'style="max-width:660px;width:100%;display:block;" alt="{alt_text}"/>'
+        f'</div>'
+    )
+
+
+# =====================================================
 # HTML 콘텐츠에 재무 테이블/차트 주입 (GPT HTML 출력용)
 # =====================================================
 
 def _inject_visuals_html(html_content, annual_financials, company_name, quarterly_financials=None):
     """
     GPT가 생성한 HTML 본문의 '최근 실적' H2 바로 뒤에
-    연간 재무 테이블 + SVG 차트 + 분기 실적 테이블을 삽입합니다.
+    연간 재무 테이블 + SVG 차트 + 분기 SVG 차트 + 분기 실적 테이블을 삽입합니다.
     """
     import re
-    table_html     = _build_financial_table_html(annual_financials)
-    chart_html     = _build_svg_chart(annual_financials, company_name)
-    quarterly_html = _build_quarterly_table_html(quarterly_financials or [])
-    visuals = table_html + chart_html + quarterly_html
+    table_html          = _build_financial_table_html(annual_financials)
+    chart_html          = _build_svg_chart(annual_financials, company_name)
+    quarterly_chart_html = _build_quarterly_svg_chart(quarterly_financials or [], company_name)
+    quarterly_html      = _build_quarterly_table_html(quarterly_financials or [])
+    visuals = table_html + chart_html + quarterly_chart_html + quarterly_html
 
     if not visuals:
         return html_content

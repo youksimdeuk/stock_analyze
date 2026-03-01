@@ -1928,6 +1928,44 @@ def fetch_global_competitor_news(name, max_items=10):
         return ''
 
 
+def extract_global_financials_from_news(name: str, news_text: str) -> str:
+    """뉴스 텍스트에서 연도별 매출/영업이익 수치를 GPT로 추출."""
+    if not news_text:
+        return ''
+    prompt = f"""다음 뉴스에서 '{name}'의 연도별 재무 수치를 추출하세요.
+뉴스에 명시된 수치만 사용하고, 추정·보완 금지.
+해외 통화는 KRW 환산 후 억원 단위로 통일.
+
+{news_text}
+
+JSON만 반환:
+{{"재무요약": [{{"연도": 2024, "매출억원": "12000", "영업이익억원": "1500"}}]}}
+
+수치가 없으면: {{"재무요약": []}}"""
+    try:
+        result = call_openai_json(prompt, max_completion_tokens=800, task_label=f'{name}재무추출')
+        rows = result.get('재무요약', [])
+        if not rows:
+            return ''
+        lines = []
+        for r in rows:
+            year = r.get('연도', '')
+            rev  = r.get('매출억원', '')
+            op   = r.get('영업이익억원', '')
+            if not year:
+                continue
+            line = f"  {year}: 매출 {rev}억원" if rev else f"  {year}:"
+            if op:
+                line += f", 영업이익 {op}억원"
+            lines.append(line)
+        if not lines:
+            return ''
+        return f"[{name} — 뉴스 기반 재무 (실수치)]\n" + '\n'.join(lines)
+    except Exception as e:
+        print(f"  [글로벌재무추출] {name} 실패: {e}")
+        return ''
+
+
 def fetch_competitor_annual_summary(corp_code, name, current_year):
     """경쟁사 최근 3년 IS 재무 요약 (매출/영업이익)"""
     year_lines = []
@@ -2169,8 +2207,13 @@ def run_analysis(spreadsheet):
                     print(f"  [경쟁사] {cname}: DART 미등록 → 뉴스 수집 시도...")
                     news_summary = fetch_global_competitor_news(cname)
                     if news_summary:
-                        summaries.append(news_summary)
-                        print(f"  [경쟁사] {cname}: 뉴스 {news_summary.count(chr(10))}건 수집 완료")
+                        fin_summary = extract_global_financials_from_news(cname, news_summary)
+                        if fin_summary:
+                            summaries.append(fin_summary + '\n' + news_summary)
+                            print(f"  [경쟁사] {cname}: 뉴스 재무 추출 완료")
+                        else:
+                            summaries.append(news_summary)
+                            print(f"  [경쟁사] {cname}: 뉴스 수집 완료 (재무 수치 미발견)")
                     else:
                         summaries.append(f"[{cname}]\n  뉴스 미수집 — GPT 학습 지식으로 보완 필요")
                     no_dart_count += 1

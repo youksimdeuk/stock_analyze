@@ -176,11 +176,11 @@ def main():
     news_items, investment_points = read_news(ws_news_vals)
     print(f"  뉴스 {len(news_items)}개 | 투자포인트 {len(investment_points)}개")
 
-    # ── 6. 밸류에이션 데이터 (주식분析 산출값 시트) ─────────────────
+    # ── 6. 밸류에이션 데이터 (주식분석 산출값 시트) ─────────────────
     print("밸류에이션 데이터 읽는 중...")
     valuation_data = {}
     try:
-        ws_calc = find_worksheet(spreadsheet, '주식분析 산출값')
+        ws_calc = find_worksheet(spreadsheet, '주식분석 산출값')
         def _cell_val(addr):
             try:
                 v = ws_calc.acell(addr).value

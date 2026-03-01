@@ -247,9 +247,15 @@ def _build_en_prompt(input_data: dict) -> str:
 =================
 
 === CONTENT RULES ===
+0. Company name convention: '{company}' is a Korean company name.
+   Determine its official English name or closest English romanization.
+   - In H1 and on the very first mention in the article body: write as "Korean (English Name)".
+     Examples: 본느 (Bonne), 삼성전자 (Samsung Electronics), 현대차 (Hyundai Motor)
+   - For all subsequent mentions in the body: use the English name only.
+   - In SEO_TITLE, SEO_DESCRIPTION, FOCUS_KEYWORD, TAGS: use the English name only (no Korean characters).
 1. Write ONLY in English.
 2. Total body content: minimum 1,800 characters.
-3. H1 must contain the focus keyword: "{company} stock analysis".
+3. H1 must contain the focus keyword: "[English Name] stock analysis".
 4. Mention the company name within the first 100 words.
 5. Include 5–7 FAQ items optimized for Google featured snippets.
 6. Valuation section: use multiple-based approach only (PER if profitable, PSR if volatile).
@@ -265,7 +271,7 @@ def _build_en_prompt(input_data: dict) -> str:
 11. Include <!-- related_posts --> comment placeholder after Valuation section.
 
 === REQUIRED HTML STRUCTURE ===
-<h1>{company} Stock Analysis [YEAR]: [subtitle with key theme]</h1>
+<h1>{company} (English Name) Stock Analysis [YEAR]: [subtitle with key theme]</h1>
 <p><strong>Executive Summary:</strong></p>
 <ul>
   <li>[Key finding 1]</li>
@@ -303,11 +309,11 @@ def _build_en_prompt(input_data: dict) -> str:
 === REQUIRED META OUTPUT BLOCKS ===
 After the HTML body, output these blocks EXACTLY:
 
-<SEO_TITLE>{company} Stock Analysis [YEAR] | Revenue, Margin & Valuation</SEO_TITLE>
-<SEO_DESCRIPTION>Under 155 characters. Include: {company} + sector + key metric + main risk.</SEO_DESCRIPTION>
+<SEO_TITLE>[English Name] Stock Analysis [YEAR] | Revenue, Margin & Valuation</SEO_TITLE>
+<SEO_DESCRIPTION>Under 155 characters. Include: [English Name] + sector + key metric + main risk.</SEO_DESCRIPTION>
 <SLUG>{ticker.lower()}-en-stock-analysis-{slug_sfx}</SLUG>
-<FOCUS_KEYWORD>{company} stock analysis</FOCUS_KEYWORD>
-<TAGS>Korea stock, {ticker}, {company}, stock analysis, Korean equity</TAGS>
+<FOCUS_KEYWORD>[English Name] stock analysis</FOCUS_KEYWORD>
+<TAGS>Korea stock, {ticker}, [English Name], stock analysis, Korean equity</TAGS>
 <FAQ_JSON>[{{"question": "...", "answer": "..."}}]</FAQ_JSON>
 """
 

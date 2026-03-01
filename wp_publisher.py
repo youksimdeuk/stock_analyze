@@ -319,7 +319,7 @@ def _build_quarterly_table_html(quarterly_financials):
 # SVG 차트 생성 (JS 불필요 — 보안 플러그인 우회)
 # =====================================================
 
-def _build_svg_chart(annual_financials, company_name=''):
+def _build_svg_chart(annual_financials, company_name='', lang='ko'):
     """
     순수 SVG로 매출액(진파랑 막대) + 영업이익(하늘색 막대) + 영업이익률(빨간 꺾은선) 차트 생성.
     JavaScript 불필요 → WordPress 보안 플러그인 영향 없음.
@@ -446,15 +446,28 @@ def _build_svg_chart(annual_financials, company_name=''):
     )
 
     # 범례
+    if lang == 'en':
+        rev_label   = 'Revenue (KRW100M)'
+        op_label    = 'Op. Profit (KRW100M)'
+        opm_label   = 'Op. Margin (%)'
+        alt_text    = f"{company_name} Annual Revenue & Operating Profit Trend" if company_name else "Annual Financial Chart"
+        chart_title = '▶ Revenue & Operating Profit Trend'
+    else:
+        rev_label   = '매출액(억원)'
+        op_label    = '영업이익(억원)'
+        opm_label   = '영업이익률(%)'
+        alt_text    = f"{company_name} 연간 매출·영업이익·영업이익률 추이" if company_name else "연간 재무 실적 차트"
+        chart_title = '▶ 매출액·영업이익 추이 및 영업이익률'
+
     ly = 14
     elems += [
         f'<rect x="{pad_l}" y="{ly}" width="12" height="12" fill="#1a3a5c" rx="2"/>',
-        f'<text x="{pad_l+15}" y="{ly+10}" font-size="11" fill="#333">매출액(억원)</text>',
+        f'<text x="{pad_l+15}" y="{ly+10}" font-size="11" fill="#333">{rev_label}</text>',
         f'<rect x="{pad_l+95}" y="{ly}" width="12" height="12" fill="#3498db" rx="2"/>',
-        f'<text x="{pad_l+110}" y="{ly+10}" font-size="11" fill="#333">영업이익(억원)</text>',
+        f'<text x="{pad_l+110}" y="{ly+10}" font-size="11" fill="#333">{op_label}</text>',
         f'<line x1="{pad_l+205}" y1="{ly+6}" x2="{pad_l+218}" y2="{ly+6}" stroke="#e74c3c" stroke-width="2.5"/>',
         f'<circle cx="{pad_l+211}" cy="{ly+6}" r="3.5" fill="#e74c3c"/>',
-        f'<text x="{pad_l+222}" y="{ly+10}" font-size="11" fill="#c0392b">영업이익률(%)</text>',
+        f'<text x="{pad_l+222}" y="{ly+10}" font-size="11" fill="#c0392b">{opm_label}</text>',
     ]
 
     svg_inner = '\n  '.join(elems)
@@ -464,12 +477,11 @@ def _build_svg_chart(annual_financials, company_name=''):
         f'\n  {svg_inner}\n'
         f'</svg>'
     )
-    svg_b64  = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
-    alt_text = f"{company_name} 연간 매출·영업이익·영업이익률 추이" if company_name else "연간 재무 실적 차트"
+    svg_b64 = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
     return (
         f'<div style="margin:24px 0;">'
         f'<p style="font-weight:bold;font-size:15px;color:#1a3a5c;margin-bottom:8px;">'
-        f'▶ 매출액·영업이익 추이 및 영업이익률</p>'
+        f'{chart_title}</p>'
         f'<img src="data:image/svg+xml;base64,{svg_b64}" '
         f'style="max-width:660px;width:100%;display:block;" alt="{alt_text}"/>'
         f'</div>'
@@ -480,7 +492,7 @@ def _build_svg_chart(annual_financials, company_name=''):
 # 분기 SVG 차트 생성
 # =====================================================
 
-def _build_quarterly_svg_chart(quarterly_financials, company_name=''):
+def _build_quarterly_svg_chart(quarterly_financials, company_name='', lang='ko'):
     """
     분기 실적 데이터로 SVG 차트 생성 (매출액·영업이익 막대 + 영업이익률 꺾은선).
     quarterly_financials는 최신순 리스트 → 시간순으로 역전하여 표시.
@@ -575,15 +587,28 @@ def _build_quarterly_svg_chart(quarterly_financials, company_name=''):
     elems.append(f'<line x1="{pad_l}" y1="{pad_t+ch}" x2="{pad_l+cw}" y2="{pad_t+ch}" stroke="#bbb" stroke-width="1.5"/>')
 
     # 범례
+    if lang == 'en':
+        rev_label   = 'Revenue (KRW100M)'
+        op_label    = 'Op. Profit (KRW100M)'
+        opm_label   = 'Op. Margin (%)'
+        alt_text    = f"{company_name} Quarterly Revenue & Operating Profit Trend" if company_name else "Quarterly Financial Chart"
+        chart_title = '▶ Quarterly Revenue & Operating Profit Trend'
+    else:
+        rev_label   = '매출액(억원)'
+        op_label    = '영업이익(억원)'
+        opm_label   = '영업이익률(%)'
+        alt_text    = f"{company_name} 분기별 매출·영업이익·영업이익률 추이" if company_name else "분기 실적 차트"
+        chart_title = '▶ 분기별 매출액·영업이익 추이 및 영업이익률'
+
     ly = 14
     elems += [
         f'<rect x="{pad_l}" y="{ly}" width="12" height="12" fill="#1a3a5c" rx="2"/>',
-        f'<text x="{pad_l+15}" y="{ly+10}" font-size="11" fill="#333">매출액(억원)</text>',
+        f'<text x="{pad_l+15}" y="{ly+10}" font-size="11" fill="#333">{rev_label}</text>',
         f'<rect x="{pad_l+95}" y="{ly}" width="12" height="12" fill="#3498db" rx="2"/>',
-        f'<text x="{pad_l+110}" y="{ly+10}" font-size="11" fill="#333">영업이익(억원)</text>',
+        f'<text x="{pad_l+110}" y="{ly+10}" font-size="11" fill="#333">{op_label}</text>',
         f'<line x1="{pad_l+205}" y1="{ly+6}" x2="{pad_l+218}" y2="{ly+6}" stroke="#e74c3c" stroke-width="2.5"/>',
         f'<circle cx="{pad_l+211}" cy="{ly+6}" r="3.5" fill="#e74c3c"/>',
-        f'<text x="{pad_l+222}" y="{ly+10}" font-size="11" fill="#c0392b">영업이익률(%)</text>',
+        f'<text x="{pad_l+222}" y="{ly+10}" font-size="11" fill="#c0392b">{opm_label}</text>',
     ]
 
     svg_inner = '\n  '.join(elems)
@@ -593,12 +618,11 @@ def _build_quarterly_svg_chart(quarterly_financials, company_name=''):
         f'\n  {svg_inner}\n'
         f'</svg>'
     )
-    svg_b64  = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
-    alt_text = f"{company_name} 분기별 매출·영업이익·영업이익률 추이" if company_name else "분기 실적 차트"
+    svg_b64 = base64.b64encode(svg_str.encode('utf-8')).decode('ascii')
     return (
         f'<div style="margin:24px 0;">'
         f'<p style="font-weight:bold;font-size:15px;color:#2c5f8a;margin-bottom:8px;">'
-        f'▶ 분기별 매출액·영업이익 추이 및 영업이익률</p>'
+        f'{chart_title}</p>'
         f'<img src="data:image/svg+xml;base64,{svg_b64}" '
         f'style="max-width:660px;width:100%;display:block;" alt="{alt_text}"/>'
         f'</div>'
@@ -1361,9 +1385,9 @@ def _inject_charts_en(html, annual_financials, company_name, quarterly_financial
 
     insert_pos = marker.end()
 
-    annual_svg  = _build_svg_chart(annual_financials, company_name) if annual_financials else ''
+    annual_svg  = _build_svg_chart(annual_financials, company_name, lang='en') if annual_financials else ''
     quarterly_svg = (
-        _build_quarterly_svg_chart(quarterly_financials, company_name)
+        _build_quarterly_svg_chart(quarterly_financials, company_name, lang='en')
         if quarterly_financials else ''
     )
 

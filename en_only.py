@@ -176,11 +176,34 @@ def main():
     news_items, investment_points = read_news(ws_news_vals)
     print(f"  뉴스 {len(news_items)}개 | 투자포인트 {len(investment_points)}개")
 
-    # ── 6. 피어 매핑 (로컬 파일) ─────────────────────
+    # ── 6. 밸류에이션 데이터 (주식분析 산출값 시트) ─────────────────
+    print("밸류에이션 데이터 읽는 중...")
+    valuation_data = {}
+    try:
+        ws_calc = find_worksheet(spreadsheet, '주식분析 산출값')
+        def _cell_val(addr):
+            try:
+                v = ws_calc.acell(addr).value
+                return str(v).strip() if v is not None and str(v).strip() else None
+            except Exception:
+                return None
+        mc   = _cell_val('J24')
+        per  = _cell_val('J27')
+        pbr  = _cell_val('N32')
+        idea = _cell_val('S31')
+        if mc:   valuation_data['market_cap'] = mc
+        if per:  valuation_data['per']        = per
+        if pbr:  valuation_data['pbr']        = pbr
+        if idea: valuation_data['user_idea']  = idea
+        print(f"  시가총액={mc} | PER={per} | PBR={pbr}")
+    except Exception as e:
+        print(f"  ⚠️ 밸류에이션 시트 읽기 실패 (무시): {e}")
+
+    # ── 7. 피어 매핑 (로컬 파일) ─────────────────────
     peer_map = load_peer_mapping()
     peers    = peer_map.get(stock_code, {})
 
-    # ── 7. EN 아티클 생성 ────────────────────────────
+    # ── 8. EN 아티클 생성 ────────────────────────────
     print("\nEN 아티클 생성 중 (GPT 호출)...")
     en_article = generate_en_article(
         company_name           = company_name,
@@ -193,6 +216,7 @@ def main():
         quarterly_by_year      = quarterly_by_year,
         related_posts          = [],
         peers                  = peers,
+        valuation_data         = valuation_data,
     )
 
     # ── 8. WordPress 발행 ────────────────────────────

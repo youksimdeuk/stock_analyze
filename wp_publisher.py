@@ -5,20 +5,49 @@ wp_publisher.py — WordPress REST API 포스트 발행
 
 import base64
 import json
+import os
 import re
+import time
+from datetime import datetime, timezone
 import requests
 from requests.auth import HTTPBasicAuth
 from config import WP_URL, WP_USERNAME, WP_APP_PASSWORD
 
-CATEGORY_NAME = '기업분석'
+# WP_BASE_URL / WP_USER 환경변수 우선, 없으면 config 값으로 폴백
+_WP_BASE_URL = os.getenv('WP_BASE_URL') or WP_URL
+_WP_USER     = os.getenv('WP_USER') or WP_USERNAME
+
+LOG_FILE = 'wp_publish_log.jsonl'
+
+CATEGORY_NAME    = '기업분석'
+EN_CATEGORY_NAME = 'Global Research'   # WordPress /en/ category for English articles
+
+# =====================================================
+# 가독성 강화: 중요 키워드 목록 (길이 내림차순 정렬 — 부분문자열 선매칭 방지)
+# =====================================================
+_BOLD_TERMS = sorted([
+    '영업이익률', '영업이익', '매출액', '당기순이익', '순이익',
+    '영업현금흐름', '잉여현금흐름', '매출총이익',
+    '자기자본이익률', '배당수익률', '부채비율', '유동비율',
+    '시장점유율', '경쟁우위', '핵심사업', '주요사업', '성장동력',
+    'ROE', 'FCF', 'CAPEX', 'EBITDA', 'PER', 'PBR', 'EPS', 'BPS',
+], key=len, reverse=True)
+
+_UNDERLINE_TERMS = sorted([
+    '투자 포인트', '핵심 리스크', '주요 리스크', '투자 리스크', '성장 전망',
+    '투자포인트', '핵심리스크',
+], key=len, reverse=True)
+
+_BOLD_RE  = re.compile('(' + '|'.join(re.escape(t) for t in _BOLD_TERMS) + ')')
+_ULINE_RE = re.compile('(' + '|'.join(re.escape(t) for t in _UNDERLINE_TERMS) + ')')
 
 
 def _auth():
-    return HTTPBasicAuth(WP_USERNAME, WP_APP_PASSWORD)
+    return HTTPBasicAuth(_WP_USER, WP_APP_PASSWORD)
 
 
 def _api(path):
-    return f"{WP_URL.rstrip('/')}/wp-json/wp/v2/{path}"
+    return f"{_WP_BASE_URL.rstrip('/')}/wp-json/wp/v2/{path}"
 
 
 # =====================================================
@@ -613,14 +642,27 @@ def _inject_anchors(html):
         return f'<h2{attrs}>{inner}</h2>'
 
     html = h2_pattern.sub(add_id, html)
+
+    # ── 특수 앵커: '투자 결론 요약' div (H2 없이 div로 생성됨) ─────
+    # 프롬프트 구조상 <div style="background:#f0f5fa..."><p>투자 결론 요약</p>... 형태
+    _INVEST_CONCLUSION_SLUG = '투자-결론-요약'
+    if '투자 결론 요약' in html and f'id="{_INVEST_CONCLUSION_SLUG}"' not in html:
+        # 바로 앞 <div 태그에 id 삽입 (투자 결론 요약 p를 포함하는 div)
+        html = re.sub(
+            r'<div([^>]*)>(?=\s*<p[^>]*>[^<]*투자 결론 요약)',
+            rf'<div id="{_INVEST_CONCLUSION_SLUG}"\1>',
+            html, count=1
+        )
+        slugs.append(('투자 결론 요약', _INVEST_CONCLUSION_SLUG))
+
     if not slugs:
         return html
 
     # ── 목차 ul li에 href 연결 ───────────────────────
     def linkify_li(li_m):
         inner = li_m.group(1)
-        if '<a ' in inner:          # 이미 링크 있으면 스킵
-            return li_m.group(0)
+        # GPT가 <a href="#..."> 를 이미 생성해도 href가 잘못될 수 있으므로
+        # 항상 텍스트 추출 → 퍼지 매칭 → 올바른 href로 교체
         li_text = re.sub(r'<[^>]+>', '', inner).strip()
         best_slug, best_score = None, 0.0
         for h2_text, slug in slugs:
@@ -630,8 +672,10 @@ def _inject_anchors(html):
                      max(len(set(li_text) | set(h2_text)), 1))
             if score > best_score:
                 best_score, best_slug = score, slug
-        if best_slug and best_score >= 0.35:
-            return f'<li><a href="#{best_slug}">{inner}</a></li>'
+        if best_slug and best_score >= 0.50:
+            # 기존 <a> 래퍼 제거 후 새 href로 교체 (강조 태그 등 inner HTML 보존)
+            inner_stripped = re.sub(r'</?a[^>]*>', '', inner)
+            return f'<li><a href="#{best_slug}">{inner_stripped}</a></li>'
         return li_m.group(0)
 
     first_ul = re.search(r'<ul>(.*?)</ul>', html, re.DOTALL)
@@ -639,6 +683,61 @@ def _inject_anchors(html):
         new_ul = re.sub(r'<li>(.*?)</li>', linkify_li, first_ul.group(1), flags=re.DOTALL)
         html = html[:first_ul.start(1)] + new_ul + html[first_ul.end(1):]
 
+    return html
+
+
+def _enhance_readability(html):
+    """
+    <p>, <li> 내 중요 키워드를 자동 강조:
+      - _UNDERLINE_TERMS : <u><strong> (밑줄 + 굵게)
+      - _BOLD_TERMS      : <strong> (굵게)
+    표·제목(h2/h3)·이미 강조된 태그(<strong>/<a>/<u>) 안쪽은 건드리지 않음.
+    """
+
+    def _fmt_text(text):
+        """순수 텍스트 노드(태그 없음)에 강조 적용"""
+        # 1) 밑줄+굵게+색(레드) 먼저 (단일 패스 regex → 부분문자열 중복 방지)
+        text = _ULINE_RE.sub(
+            r'<u><strong style="color:#c0392b">\1</strong></u>', text
+        )
+        # 2) 이제 text 안에 태그가 생길 수 있으므로 분리 후 굵게+색(네이비) 적용
+        parts = re.split(r'(<[^>]+>)', text)
+        depth, out = 0, []
+        for part in parts:
+            if part.startswith('<'):
+                if re.match(r'<(strong|u)\b', part, re.I):
+                    depth += 1
+                elif re.match(r'</(strong|u)>', part, re.I):
+                    depth = max(0, depth - 1)
+                out.append(part)
+            elif depth > 0:
+                out.append(part)          # 이미 강조 안쪽 → 패스
+            else:
+                out.append(_BOLD_RE.sub(
+                    r'<strong style="color:#1a3a5c">\1</strong>', part
+                ))
+        return ''.join(out)
+
+    def _process(m):
+        open_tag, content, close_tag = m.group(1), m.group(2), m.group(3)
+        # content 내 기존 태그(a, strong, em 등) 안쪽은 건드리지 않음
+        parts = re.split(r'(<[^>]+>)', content)
+        depth, result = 0, []
+        for part in parts:
+            if part.startswith('<'):
+                if re.match(r'<(strong|b|u|em|a)\b', part, re.I):
+                    depth += 1
+                elif re.match(r'</(strong|b|u|em|a)>', part, re.I):
+                    depth = max(0, depth - 1)
+                result.append(part)
+            elif depth > 0:
+                result.append(part)
+            else:
+                result.append(_fmt_text(part))
+        return open_tag + ''.join(result) + close_tag
+
+    html = re.sub(r'(<p[^>]*>)(.*?)(</p>)',   _process, html, flags=re.DOTALL)
+    html = re.sub(r'(<li[^>]*>)(.*?)(</li>)', _process, html, flags=re.DOTALL)
     return html
 
 
@@ -874,7 +973,271 @@ def _build_faq_schema_ld(faq_json_str):
         '@type': 'FAQPage',
         'mainEntity': entities,
     }
-    return f'<script type="application/ld+json">\n{json.dumps(schema, ensure_ascii=False, indent=2)}\n</script>\n'
+    return json.dumps(schema, ensure_ascii=False, indent=2)
+
+
+# =====================================================
+# JSONL 로그
+# =====================================================
+
+def _log_jsonl(record: dict):
+    """wp_publish_log.jsonl 에 줄 단위 기록 (타임스탬프 자동 포함)"""
+    record.setdefault('timestamp', datetime.now(timezone.utc).isoformat())
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+    except Exception as e:
+        print(f'  [로그] JSONL 기록 실패: {e}')
+
+
+# =====================================================
+# 공통 HTTP 요청 헬퍼
+# =====================================================
+
+def wp_request(method, path, json_body=None, params=None):
+    """
+    WordPress REST API 공통 요청 헬퍼.
+    인증: _WP_BASE_URL / _WP_USER / WP_APP_PASSWORD (Application Password Basic Auth).
+    에러 케이스별 명시적 메시지를 예외로 발생시킨다.
+    """
+    url  = f"{_WP_BASE_URL.rstrip('/')}/wp-json/wp/v2/{path.lstrip('/')}"
+    auth = HTTPBasicAuth(_WP_USER, WP_APP_PASSWORD)
+    try:
+        resp = requests.request(
+            method.upper(), url,
+            json=json_body, params=params,
+            auth=auth, timeout=30,
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f'[WP] 요청 타임아웃 (30s): {method.upper()} {url}')
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f'[WP] 연결 실패 — WP_BASE_URL 주소를 확인하세요: {e}')
+
+    if resp.status_code in (401, 403):
+        raise PermissionError(
+            f'[WP] 인증/권한 오류 ({resp.status_code}): '
+            'WP_USER 또는 WP_APP_PASSWORD(Application Password)를 확인하세요.'
+        )
+    if resp.status_code == 400:
+        raise ValueError(
+            f'[WP] 잘못된 요청 (400): 전송 필드를 확인하세요. '
+            f'응답: {resp.text[:300]}'
+        )
+    resp.raise_for_status()
+    return resp
+
+
+# =====================================================
+# SEO/AEO 품질 체크
+# =====================================================
+
+def _check_seo_quality(content, focus_keyword):
+    """
+    SEO/AEO 최소 품질 점검.
+      1) focus_keyword 문구가 본문에 없으면 도입부 첫 </ul> 뒤(없으면 </h1> 뒤)에 1문장 자동 삽입.
+      2) href= 링크가 0개이면 경고 로그만 출력 (강제 삽입 안 함).
+    반환: (수정된 content, 경고 메시지 리스트)
+    """
+    warnings_list = []
+    current_year  = datetime.now().year
+
+    if focus_keyword and focus_keyword not in content:
+        sentence    = (
+            f'<p>{focus_keyword}을(를) {current_year}년 기준으로 '
+            f'데이터 기반 점검합니다.</p>'
+        )
+        first_ul_end = content.find('</ul>')
+        h1_match     = re.search(r'</h1>', content)
+        if first_ul_end != -1:
+            pos     = first_ul_end + len('</ul>')
+            content = content[:pos] + '\n' + sentence + content[pos:]
+            print(f'  [SEO품질] focus_keyword 미포함 → 도입부 ul 뒤 삽입: "{focus_keyword}"')
+        elif h1_match:
+            pos     = h1_match.end()
+            content = content[:pos] + '\n' + sentence + content[pos:]
+            print(f'  [SEO품질] focus_keyword 미포함 → H1 뒤 삽입: "{focus_keyword}"')
+
+    if not re.search(r'href=', content, re.IGNORECASE):
+        msg = '  [SEO품질] ⚠️ 본문에 href 링크가 없습니다. 내부/외부 링크 추가를 권장합니다.'
+        print(msg)
+        warnings_list.append(msg)
+
+    return content, warnings_list
+
+
+# =====================================================
+# Rank Math 메타 검증
+# =====================================================
+
+def verify_rank_math_meta(post_id, expected_meta, warn_keys=None):
+    """
+    GET /wp-json/wp/v2/posts/{id}?context=edit 로 Rank Math 메타 3종 검증.
+    GET 1회로 warn_keys(post_meta_extra 키 목록) 존재 여부도 함께 확인.
+
+    Args:
+        expected_meta : Rank Math 3종 기대값 dict — 불일치 시 False 반환
+        warn_keys     : post_meta_extra 키 목록(list) — 없을 경우 경고만 출력, 반환값 영향 없음
+    반환: True(모두 일치) / False(불일치 또는 키 없음)
+    """
+    try:
+        resp = wp_request('GET', f'posts/{post_id}', params={'context': 'edit'})
+    except Exception as e:
+        print(f'  [메타검증] GET 실패: {e}')
+        return False
+
+    meta = resp.json().get('meta', {})
+
+    # Rank Math 3종 strict 검증
+    ok = True
+    for key, expected_val in expected_meta.items():
+        actual_val = meta.get(key)
+        if actual_val != expected_val:
+            print(f'  [메타검증] 불일치 — {key}')
+            print(f'    기대: {str(expected_val)[:80]}')
+            print(f'    실제: {str(actual_val)[:80]}')
+            ok = False
+
+    if ok:
+        print('  [메타검증] Rank Math 메타 3종 일치 ✓')
+
+    # post_meta_extra 키 존재 warn-only (show_in_rest 미등록 감지용)
+    for key in (warn_keys or []):
+        if key not in meta:
+            print(f'  [메타검증] 경고: "{key}" 저장 후 조회 안됨 '
+                  '(register_post_meta show_in_rest 확인 필요)')
+
+    return ok
+
+
+# =====================================================
+# 포스트 Upsert (생성 또는 업데이트)
+# =====================================================
+
+def _nonempty(v):
+    """None·빈 문자열·공백 문자열이면 None 반환, 아니면 strip() 된 값 반환."""
+    if v is None:
+        return None
+    if isinstance(v, str):
+        s = v.strip()
+        return s if s else None
+    return v  # 문자열 외 타입(int 등)은 그대로 통과
+
+
+def _rank_str(v):
+    """Rank Math 메타 전용: None이면 None, 그 외 str() 변환 후 strip·빈값 걸러냄.
+    숫자/리스트 등 비문자열이 실수로 들어와도 WP가 기대하는 string으로 변환."""
+    if v is None:
+        return None
+    return _nonempty(str(v))
+
+
+def upsert_post(post_payload):
+    """
+    WordPress REST API로 포스트 생성(POST) 또는 업데이트(PUT).
+    Rank Math 메타 주입 + 검증 (불일치 시 PUT 재시도 1회) 포함.
+    JSONL 로그 자동 기록.
+
+    post_payload 키:
+        post_id         : Optional[int]  — 있으면 업데이트, None 이면 신규 생성
+        title           : str
+        content         : str            — HTML 본문
+        slug            : str
+        status          : "draft" | "publish"  (기본 "draft")
+        categories      : List[int]      — 카테고리 ID 리스트
+        tags            : List[int]      — 태그 ID 리스트
+        seo_title       : str
+        meta_description: str
+        focus_keyword   : str
+
+    반환: (post_id: int, link: str)
+    """
+    post_id   = post_payload.get('post_id')
+    # Rank Math 3종: str() 캐스팅 + strip + 빈값 → None (기존 WP 값 덮어쓰기 방지)
+    seo_title = _rank_str(post_payload.get('seo_title'))
+    meta_desc = _rank_str(post_payload.get('meta_description'))
+    focus_kw  = _rank_str(post_payload.get('focus_keyword'))  # None 가능
+
+    # SEO 품질 체크: 본문 문자열 처리이므로 focus_kw or '' 로 빈 문자열 보장
+    content, _ = _check_seo_quality(post_payload.get('content', ''), focus_kw or '')
+
+    # 값이 있는 meta 키만 전송 (None·빈 문자열·공백 문자열은 전송 제외)
+    meta_body = {}
+    if seo_title:
+        meta_body['_rank_math_title']         = seo_title
+    if meta_desc:
+        meta_body['_rank_math_description']   = meta_desc
+    if focus_kw:
+        meta_body['_rank_math_focus_keyword'] = focus_kw
+    # 추가 meta (FAQ Schema 등) 병합 — Rank Math 검증 대상에는 포함하지 않음
+    meta_body.update(post_payload.get('post_meta_extra', {}))
+
+    body = {
+        'title':      post_payload.get('title', ''),
+        'content':    content,
+        'slug':       post_payload.get('slug', ''),
+        'status':     post_payload.get('status', 'draft'),
+        'categories': post_payload.get('categories', []),
+        'tags':       post_payload.get('tags', []),
+    }
+    if meta_body:
+        body['meta'] = meta_body
+
+    if post_id:
+        print(f'  [upsert] 포스트 업데이트 (ID={post_id})...')
+        resp   = wp_request('PUT', f'posts/{post_id}', json_body=body)
+        action = 'update'
+    else:
+        print('  [upsert] 포스트 신규 생성 중...')
+        resp   = wp_request('POST', 'posts', json_body=body)
+        action = 'create'
+
+    data     = resp.json()
+    new_id   = data.get('id')
+    new_link = data.get('link', '')
+    print(f'  [upsert] {action} 완료: ID={new_id}, URL={new_link}')
+
+    # Rank Math 메타 검증 (실제로 전송한 값만 비교, _nonempty 통과값 재사용)
+    expected = {}
+    if seo_title:
+        expected['_rank_math_title']         = seo_title
+    if meta_desc:
+        expected['_rank_math_description']   = meta_desc
+    if focus_kw:
+        expected['_rank_math_focus_keyword'] = focus_kw
+    extra_keys = list(post_payload.get('post_meta_extra', {}).keys())
+    # GET 1회로 Rank Math 검증 + extra meta 존재 warn-only 동시 처리
+    meta_ok = verify_rank_math_meta(new_id, expected, warn_keys=extra_keys) if expected else True
+    if not meta_ok:
+        print('  [upsert] 메타 불일치 → PUT 재시도 (1회)...')
+        time.sleep(2)
+        try:
+            wp_request('PUT', f'posts/{new_id}', json_body={'meta': expected})
+            # 재시도: Rank Math 3종만 재검증 (extra warn은 이미 첫 검증에서 출력됨)
+            meta_ok = verify_rank_math_meta(new_id, expected)
+        except Exception as e:
+            print(f'  [upsert] 재시도 실패: {e}')
+            meta_ok = False
+
+    log_rec = {
+        'action':        action,
+        'post_id':       new_id,
+        'status_code':   resp.status_code,
+        'ok':            meta_ok,
+        'link':          new_link,
+        'slug':          post_payload.get('slug', ''),
+        'seo_title':     seo_title or '',
+        'focus_keyword': focus_kw,
+        'error':         None if meta_ok else 'rank_math_meta_mismatch',
+    }
+    _log_jsonl(log_rec)
+
+    if not meta_ok:
+        raise RuntimeError(
+            f'[WP] Rank Math 메타 재시도 후에도 불일치 (post_id={new_id}). '
+            'wp_publish_log.jsonl 을 확인하세요.'
+        )
+
+    return new_id, new_link
 
 
 # =====================================================
@@ -921,63 +1284,248 @@ def publish_post(title, content, company_data, seo_data=None):
     # 목차 앵커 연결 (H2 id 부여 + 목차 li href)
     wp_content = _inject_anchors(wp_content)
 
-    # FAQ Schema JSON-LD 본문 앞 주입
-    faq_json_str = seo_data.get('faq_json', '')
-    schema_ld = _build_faq_schema_ld(faq_json_str)
-    if schema_ld:
-        wp_content = schema_ld + wp_content
-        print("  FAQ Schema JSON-LD 주입 완료")
+    # 가독성 강화: 중요 키워드 굵게 / 밑줄+굵게 처리
+    wp_content = _enhance_readability(wp_content)
 
     # SEO 필드
+    faq_json_str     = seo_data.get('faq_json', '')
     meta_description = seo_data.get('meta_description', '')
     focus_keyword    = seo_data.get('focus_keyword', '')
     slug             = seo_data.get('slug', '')
 
-    post_body = {
-        'title':      title,
-        'content':    wp_content,
-        'status':     'draft',
-        'categories': [category_id],
-        'tags':       tag_ids,
-    }
-    if slug:
-        post_body['slug'] = slug
-    seo_title = seo_data.get('seo_title', '')
-    if meta_description or focus_keyword or seo_title:
-        post_body['meta'] = {
-            'rank_math_title':          seo_title,
-            'rank_math_description':    meta_description,
-            'rank_math_focus_keyword':  focus_keyword,
-        }
+    # SEO/AEO 품질 체크 (focus_keyword 미포함 시 자동 삽입, href 없으면 경고)
+    if focus_keyword:
+        wp_content, _ = _check_seo_quality(wp_content, focus_keyword)
+
+    # NinjaFirewall Rule 115 대응: content 내 모든 <script> 블록 제거
+    # FAQ Schema JSON-LD는 post_meta_extra(_faq_schema_json)로 따로 전송됨
+    wp_content = re.sub(r'<script[^>]*>.*?</script>', '', wp_content,
+                        flags=re.IGNORECASE | re.DOTALL)
+
+    # "(추정)" 텍스트 제거 (괄호 포함 다양한 형태 대응)
+    wp_content = re.sub(r'\(추정[^)]*\)', '', wp_content)
+    wp_content = re.sub(r'（추정[^）]*）', '', wp_content)  # 전각 괄호
+
+    seo_title       = seo_data.get('seo_title', '')
+    # FAQ Schema JSON-LD: NinjaFirewall이 content 내 <script> 차단 → post meta에 저장
+    # functions.php에서 register_post_meta + wp_head 훅으로 출력 필요
+    faq_schema_json = _build_faq_schema_ld(faq_json_str)
+    if faq_schema_json:
+        print("  FAQ Schema JSON-LD → post meta 저장")
 
     # 중복 체크: 기존 draft/published 포스트가 있으면 UPDATE, 없으면 CREATE
-    existing_id, existing_url, existing_status = find_existing_post(company_name)
+    existing_id, _, existing_status = find_existing_post(company_name)
     if existing_id:
         print(f"  ⚠️ 기존 {existing_status} 포스트 발견 (ID={existing_id}) → 업데이트")
-        r = requests.patch(
-            _api(f'posts/{existing_id}'),
-            json=post_body,
-            auth=_auth(),
-            timeout=30,
-        )
-    else:
-        print("  WP 포스트 생성 중 (임시저장 + SEO)...")
-        r = requests.post(
-            _api('posts'),
-            json=post_body,
-            auth=_auth(),
-            timeout=30,
-        )
-    r.raise_for_status()
 
-    data     = r.json()
-    post_id  = data.get('id')
-    post_url = data.get('link', '')
+    # upsert_post에 위임 — REST 호출 / Rank Math 검증 / JSONL 로그를 한 곳에서 처리
+    post_payload = {
+        'post_id':          existing_id,        # None 이면 신규 생성
+        'title':            title,
+        'content':          wp_content,
+        'slug':             slug,
+        'status':           'draft',
+        'categories':       [category_id],
+        'tags':             tag_ids,
+        'seo_title':        seo_title,
+        'meta_description': meta_description,
+        'focus_keyword':    focus_keyword,
+        'post_meta_extra':  {'_faq_schema_json': faq_schema_json} if faq_schema_json else {},
+    }
+    _, post_url = upsert_post(post_payload)
 
-    action = "업데이트" if existing_id else "생성"
-    print(f"  WP 포스트 {action} 완료: ID={post_id}, URL={post_url}")
     if slug:
         print(f"  슬러그: {slug}")
     if meta_description:
         print(f"  메타디스크립션: {meta_description[:60]}...")
     return post_url
+
+
+# =====================================================
+# 영어 발행 파이프라인 (EN — Global Research 카테고리)
+# =====================================================
+
+def _inject_charts_en(html, annual_financials, company_name, quarterly_financials=None):
+    """
+    영어 아티클 본문의 <h2>Revenue & Margin Snapshot</h2> 바로 다음에
+    기존 SVG 차트(annual + quarterly)를 주입한다.
+    H2를 찾지 못하면 원본 html 그대로 반환 (warn-only).
+    """
+    marker = re.search(
+        r'(<h2[^>]*>[^<]*Revenue[^<]*Margin[^<]*Snapshot[^<]*</h2>)',
+        html, re.IGNORECASE
+    )
+    if not marker:
+        print('  [EN차트] "Revenue & Margin Snapshot" H2 미발견 — 차트 주입 건너뜀')
+        return html
+
+    insert_pos = marker.end()
+
+    annual_svg  = _build_svg_chart(annual_financials, company_name) if annual_financials else ''
+    quarterly_svg = (
+        _build_quarterly_svg_chart(quarterly_financials, company_name)
+        if quarterly_financials else ''
+    )
+
+    chart_block = '\n'
+    if annual_svg:
+        chart_block += (
+            '<div class="chart-wrap" style="margin:16px 0;">'
+            '<p><strong>Revenue trend (annual)</strong></p>'
+            f'{annual_svg}'
+            '</div>\n'
+        )
+    if quarterly_svg:
+        chart_block += (
+            '<div class="chart-wrap" style="margin:16px 0;">'
+            '<p><strong>Quarterly revenue & operating margin</strong></p>'
+            f'{quarterly_svg}'
+            '</div>\n'
+        )
+
+    if not chart_block.strip():
+        return html
+
+    return html[:insert_pos] + chart_block + html[insert_pos:]
+
+
+def publish_post_en(article: dict, company_data: dict) -> str:
+    """
+    영어 아티클을 WordPress 'Global Research' 카테고리에 draft 발행.
+
+    article     : generate_en_article() 반환 dict
+    company_data: {'company_name': str, 'stock_code': str,
+                   'annual_financials': dict, 'quarterly_financials': list}
+    반환: post_url (str)
+    """
+    company_name        = company_data.get('company_name', '')
+    annual_financials   = company_data.get('annual_financials', {})
+    quarterly_financials = company_data.get('quarterly_financials', [])
+
+    print('  [EN] 카테고리/태그 준비 중...')
+    en_cat_id = get_or_create_category(EN_CATEGORY_NAME)
+    tag_ids   = get_or_create_tags(article.get('tags', []))
+
+    # SVG 차트 주입 (영문 H2 기준)
+    content = _inject_charts_en(
+        article.get('content', ''),
+        annual_financials,
+        company_name,
+        quarterly_financials,
+    )
+
+    # TOC 앵커 연결 (기존 함수 재사용)
+    content = _inject_anchors(content)
+    # _enhance_readability 는 KO 금융 키워드 기반 → EN에는 미적용
+
+    # NinjaFirewall Rule 115 대응: <script> 블록 제거
+    content = re.sub(r'<script[^>]*>.*?</script>', '', content,
+                     flags=re.IGNORECASE | re.DOTALL)
+
+    # "(추정)" 텍스트 제거
+    content = re.sub(r'\(추정[^)]*\)', '', content)
+    content = re.sub(r'（추정[^）]*）', '', content)  # 전각 괄호
+
+    # FAQ Schema JSON-LD
+    faq_schema_json = _build_faq_schema_ld(article.get('faq_json', ''))
+    if faq_schema_json:
+        print('  [EN] FAQ Schema JSON-LD → post meta 저장')
+
+    # 중복 체크 — EN은 slug 기반 (KO 회사명 검색과 분리)
+    existing_id = None
+    slug = article.get('slug', '')
+    if slug:
+        try:
+            r = wp_request('GET', 'posts', params={'slug': slug, 'status': 'any'})
+            hits = r.json()
+            if isinstance(hits, list) and hits:
+                existing_id = hits[0].get('id')
+                print(f'  [EN] 기존 포스트 발견 (ID={existing_id}) → 업데이트')
+        except Exception as e:
+            print(f'  [EN] 중복 체크 GET 실패 (무시): {e}')
+
+    post_payload = {
+        'post_id':          existing_id,
+        'title':            article.get('title', ''),
+        'content':          content,
+        'slug':             slug,
+        'status':           'draft',
+        'categories':       [en_cat_id],
+        'tags':             tag_ids,
+        'seo_title':        article.get('seo_title', ''),
+        'meta_description': article.get('meta_description', ''),
+        'focus_keyword':    article.get('focus_keyword', ''),
+        'post_meta_extra':  {'_faq_schema_json': faq_schema_json} if faq_schema_json else {},
+    }
+    _, post_url = upsert_post(post_payload)
+    return post_url
+
+
+# =====================================================
+# 실행 예시
+# =====================================================
+
+if __name__ == '__main__':
+    """
+    generate_wp_article() 결과를 받아 upsert_post()로 업로드하는 최소 예시.
+    실제 사용 시 아래 더미 article 변수를 generate_wp_article() 호출로 교체하세요.
+
+    환경변수 필수:
+        WP_BASE_URL   (또는 WP_URL)         예: https://hanalpha.com
+        WP_USER       (또는 WP_USERNAME)    예: admin
+        WP_APP_PASSWORD                     워드프레스 Application Password
+    """
+    from wp_content_generator import generate_wp_article  # noqa: F401
+
+    # ── 실제 사용 예시 (주석 해제 후 데이터 입력) ──────────────────────────
+    # article = generate_wp_article(
+    #     company_name='삼성전자',
+    #     stock_code='005930',
+    #     annual_metrics_by_year=[(2022, {...}), (2023, {...}), (2024, {...})],
+    #     analysis={'산업 개요': '...', '투자 관점 핵심 리스크': '...'},
+    #     competition={'경쟁사목록': [{'기업명': 'SK하이닉스', ...}]},
+    #     news_items=[{'title': '최신 뉴스', 'pubDate': '2025-01-01'}],
+    #     investment_points=[{'번호': 1, '투자포인트': 'HBM 수요 증가'}],
+    # )
+
+    # ── 테스트용 더미 article (API 호출 없이 구조 확인용) ──────────────────
+    article = {
+        'title':            '테스트 기업 주식 분석 (2025년) — 실적·산업·리스크 점검',
+        'content':          (
+            '<h1>테스트 기업 주식 분석</h1>'
+            '<ul><li>핵심 결론: 테스트</li></ul>'
+            '<p>본문 내용입니다.</p>'
+        ),
+        'seo_title':        '테스트 기업 주식 분석: 실적·산업·리스크 점검',
+        'meta_description': '테스트 기업(000000)의 사업 구조와 실적 흐름을 점검합니다.',
+        'slug':             '000000-stock-analysis-2025-01',
+        'focus_keyword':    '테스트 기업 주식 분석',
+        'category':         '기업분석',
+        'tags':             ['테스트 기업', '000000', '주식분석'],
+        'faq_json':         '',
+        'annual_financials':    {},
+        'quarterly_financials': [],
+    }
+
+    # 카테고리/태그 ID 확보
+    cat_id  = get_or_create_category(article.get('category', '기업분석'))
+    tag_ids = get_or_create_tags(article.get('tags', []))
+
+    post_payload = {
+        'post_id':          None,       # 업데이트 시 기존 포스트 int ID 입력
+        'title':            article['title'],
+        'content':          article['content'],
+        'slug':             article['slug'],
+        'status':           'draft',    # 즉시 발행: 'publish'
+        'categories':       [cat_id],
+        'tags':             tag_ids,
+        'seo_title':        article['seo_title'],
+        'meta_description': article['meta_description'],
+        'focus_keyword':    article['focus_keyword'],
+    }
+
+    new_id, post_url = upsert_post(post_payload)
+    print(f'\n발행 완료')
+    print(f'  post_id : {new_id}')
+    print(f'  URL     : {post_url}')
+    print(f'  로그    : {LOG_FILE}')

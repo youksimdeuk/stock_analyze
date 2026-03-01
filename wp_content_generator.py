@@ -85,14 +85,24 @@ def _build_industry_text(analysis):
         return ""
     key_sections = [
         "산업 개요", "산업 현재 업황", "기업의 해자(경쟁우위)",
-        "주요 제품", "기업 상황 (재무 중심)", "매출 구조 및 이익 변동 요인",
+        "주요 제품", "주요 제품 설명", "기업 상황 (재무 중심)",
+        "매출 구조 및 이익 변동 요인",
         "최신 기술 트렌드", "투자 관점 핵심 리스크",
     ]
+    # 섹션별 글자 제한 (기본 1000자, 주요 섹션은 넉넉히 확장)
+    limits = {
+        "주요 제품": 2000,
+        "주요 제품 설명": 2000,
+        "기업 상황 (재무 중심)": 2000,   # FCF + 밸류에이션 + 투자아이디어 수용
+        "매출 구조 및 이익 변동 요인": 1500,
+        "투자 관점 핵심 리스크": 1500,
+    }
     parts = []
     for key in key_sections:
         val = (analysis.get(key) or '').strip()
         if val:
-            parts.append(f"[{key}] {val[:600]}")
+            limit = limits.get(key, 1000)
+            parts.append(f"[{key}] {val[:limit]}")
     return "\n".join(parts)
 
 
@@ -101,11 +111,19 @@ def _build_competition_summary(competition):
         return ""
     competitors = competition.get('경쟁사목록', [])
     lines = []
-    for c in competitors[:5]:
-        name     = c.get('기업명', '')
-        strength = (c.get('강점') or '')[:100]
+    for c in competitors[:8]:
+        name    = c.get('기업명', '')
+        country = (c.get('국가') or '').strip()
+        rank    = (c.get('순위(국내/글로벌)') or '')[:60]
+        share   = (c.get('시장점유율(%)') or '')[:40]
+        product = (c.get('주요 제품(매출액/비중)') or '')[:80]
+        strength = (c.get('강점') or '')[:120]
         risk     = (c.get('약점/리스크') or '')[:80]
         line = name
+        if country:  line += f" [{country}]"
+        if rank:     line += f" | 순위: {rank}"
+        if share:    line += f" | 시장점유율: {share}"
+        if product:  line += f" | 주요제품: {product}"
         if strength: line += f" | 강점: {strength}"
         if risk:     line += f" | 리스크: {risk}"
         lines.append(line)
@@ -173,13 +191,17 @@ def _build_input_json(company_name, stock_code, annual_financials, quarterly_lis
     # 연간 재무: 원단위 → 억원/% 변환 (GPT가 읽기 쉽게)
     fin_clean = {}
     for year, m in annual_financials.items():
+        _ocf   = m.get('영업활동현금흐름')
+        _capex = m.get('CAPEX')
+        _fcf   = (_ocf - _capex) if (_ocf is not None and _capex is not None) else None
         fin_clean[str(year)] = {
             '매출액억원':     _to_eok(m.get('매출액')),
             '영업이익억원':   _to_eok(m.get('영업이익')),
             '영업이익률pct':  _to_pct(m.get('영업이익률')),
             '당기순이익억원': _to_eok(m.get('당기순이익')),
-            'OCF억원':        _to_eok(m.get('영업활동현금흐름')),
-            'CAPEX억원':      _to_eok(m.get('CAPEX')),
+            'OCF억원':        _to_eok(_ocf),
+            'CAPEX억원':      _to_eok(_capex),
+            'FCF억원':        _to_eok(_fcf),
             'ROEpct':         _to_pct(m.get('ROE')),
         }
 
@@ -228,9 +250,7 @@ def build_prompt(input_json):
 
     data_json_str = json.dumps(input_json, ensure_ascii=False, indent=2)
 
-    return f"""이전 SEO/구조/점검 지시를 모두 무시하고 아래 규칙을 최신 기준으로 적용한다.
-
-당신은 HanAlpha의 데이터 기반 한국 주식 리서치 에디터다.
+    return f"""당신은 HanAlpha의 데이터 기반 한국 주식 리서치 에디터다.
 
 목표:
 - 한국 상장 기업 분석 콘텐츠를 SEO + AEO + YMYL 기준으로 작성한다.
@@ -282,15 +302,19 @@ JSON에 없는 정보는 단정하지 말 것.
 <h2>{company_name}은 어떤 사업 구조를 가지고 있는가?</h2>
 2문장 요약 (결론 → 근거 구조)
 - 사업 구조
+- 주요 제품·서비스 소개 (제품명 + 매출 비중 + 용도/특징, industry_analysis의 [주요 제품] 기반)
 - 매출 구성
 - 최근 실적 흐름
 
 표 1: 사업 구조·매출 구성 요약
+| 제품/사업 | 매출 비중 | 주요 용도 | 비고 |
+(주요 제품 기반으로 작성, industry_analysis 데이터 사용)
 
 <h2>최근 실적은 구조적으로 개선되고 있는가?</h2>
 2문장 요약 (결론 → 근거 구조)
 - 주의: 연간 재무 테이블·SVG 차트·분기 실적 표는 이 H2 바로 아래에 자동 삽입됩니다. 수치를 직접 나열하거나 연도별·분기별 실적을 텍스트로 요약하지 마세요.
-- 재무 안정성, 현금흐름 특이사항, 이익 품질 등 정성적 분석만 서술하세요.
+- 반드시 포함: FCF(잉여현금흐름) 추이 평가 — annual_financials의 FCF억원 값 활용 (FCF = OCF - CAPEX, 양수면 자체 투자 여력 확보, 음수면 외부 자금 필요)
+- 재무 안정성, 현금흐름 특이사항(FCF 포함), 이익 품질 등 정성적 분석만 서술하세요.
 
 표 2: 재무 체크 항목 (수치 나열 금지, 정성적 체크리스트로 작성)
 
@@ -299,6 +323,18 @@ JSON에 없는 정보는 단정하지 말 것.
 - 산업 수요
 - 경쟁 구조
 - 정책/거시 변수
+
+<h2>{company_name}은 글로벌 경쟁사 대비 어떤 위치인가?</h2>
+2문장 요약 (결론 → 근거 구조)
+- competition 데이터 기반으로 국내외 경쟁 현황 서술
+- 반드시 동일 산업에서 포지션·제품이 유사한 글로벌 기업 2개 이상 포함
+  (competition 데이터에 글로벌 기업이 부족하면 GPT 학습 지식으로 보완, 수치는 "(추정)" 표기)
+- 분석 대상 기업의 차별화 포인트와 상대적 강·약점 서술
+
+표 3: 주요 경쟁사 비교 (국내외)
+| 기업명 | 국가/증시 | 주요 제품·서비스 | 시장 포지셔닝 | 핵심 강점 |
+분석 대상 기업 포함 최소 4개 기업 (글로벌 기업 2개 이상 필수)
+금액 수치는 억원 단위, GPT 학습 지식 활용 시 "(추정)" 표기 필수
 
 <h2>투자 체크리스트로 보면 어떤 구간인가?</h2>
 2문장 요약 (결론 → 근거 구조)
@@ -313,8 +349,23 @@ JSON에 없는 정보는 단정하지 말 것.
 각 리스크는 "발생 시 영향" 포함
 
 <h2>결론: 구조적 관점에서의 현재 위치</h2>
-- 중립적 평가
-- 다음 분기 관찰 포인트 3~5개
+2문장 요약 (중립적 평가 + 핵심 변수)
+다음 분기 관찰 포인트 2~3개 (ul/li)
+
+그 다음, 아래 HTML 구조를 그대로 사용하여 투자 결론 4~5가지를 출력하라 (스타일 속성 유지, 내용만 교체):
+
+<div style="background:#f0f5fa;border-left:5px solid #1a3a5c;border-radius:0 8px 8px 0;padding:20px 24px;margin:28px 0;">
+<p style="font-weight:700;color:#1a3a5c;font-size:16px;margin:0 0 14px 0;">투자 결론 요약</p>
+<ol style="margin:0;padding-left:22px;color:#333;font-size:14px;line-height:2.2;">
+<li>[결론 1: 재무·실적 관점 — 현재 상태를 1문장으로]</li>
+<li>[결론 2: 산업·업황 관점 — 사이클 위치를 1문장으로]</li>
+<li>[결론 3: 경쟁우위·차별화 관점 — 핵심 강점을 1문장으로]</li>
+<li>[결론 4: 리스크·변수 관점 — 주요 불확실성을 1문장으로]</li>
+<li>[결론 5: 관찰 포인트·트리거 — 다음 분기 확인 지표를 1문장으로]</li>
+</ol>
+</div>
+
+규칙: 투자 권유 표현 금지. 조건부·중립 표현 사용. 수치 인용 시 입력 데이터 기반만.
 
 <h2>자주 묻는 질문(FAQ)</h2>
 FAQ 6~8개. 아래 HTML 구조를 그대로 사용하라 (스타일 속성 유지, 내용만 교체):
@@ -617,7 +668,7 @@ def generate_wp_article(company_name, stock_code, annual_metrics_by_year,
             },
             {'role': 'user', 'content': prompt}
         ],
-        max_completion_tokens=16000,
+        max_completion_tokens=32000,
     )
 
     full_text = response.choices[0].message.content.strip()

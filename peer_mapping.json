@@ -1,0 +1,13 @@
+{
+  "_readme": "ticker(6자리 DART 종목코드)를 키로 domestic/global peers 정의. 없으면 graceful skip.",
+  "_example": {
+    "domestic_peers": [
+      {"name": "CompanyA", "ticker": "123456"},
+      {"name": "CompanyB", "ticker": "654321"}
+    ],
+    "global_peers": [
+      {"name": "GlobalCorp1", "ticker": "NYSE:XXX"},
+      {"name": "GlobalCorp2", "ticker": "NASDAQ:YYY"}
+    ]
+  }
+}

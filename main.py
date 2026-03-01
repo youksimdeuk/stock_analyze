@@ -39,6 +39,8 @@ from config import (
 )
 from wp_content_generator import generate_wp_article
 from wp_publisher import publish_post, get_related_posts, CATEGORY_NAME
+from wp_en_content_generator import generate_en_article, load_peer_mapping
+from wp_publisher import publish_post_en
 
 
 def _send_publish_notification(company_name, focus_keyword, post_url):
@@ -409,14 +411,15 @@ def get_corp_code_by_name(name):
     return None
 
 
-def extract_competitor_names(report_text, news_items, company_name, max_count=5):
-    """사업보고서 + 뉴스에서 주요 경쟁사 기업명 GPT 추출"""
+def extract_competitor_names(report_text, news_items, company_name, max_count=7):
+    """사업보고서 + 뉴스에서 주요 경쟁사 기업명 GPT 추출 (국내+글로벌 포함)"""
     news_text = "\n".join([
         clean_html(item.get('title', ''))
         for item in news_items[:20]
     ])
     prompt = f"""다음 자료에서 '{company_name}'의 주요 경쟁사 기업명을 최대 {max_count}개 추출하세요.
-한국 상장기업 위주로, 공식 기업명으로 작성하세요. 분석 대상 기업 자신은 제외하세요.
+국내 기업과 글로벌 기업을 모두 포함하세요. 반드시 동일 산업에서 유사한 제품·포지션을 가진 글로벌 기업 2개 이상을 포함하세요.
+공식 기업명으로 작성하세요. 분석 대상 기업 자신은 제외하세요.
 
 ■ 사업보고서 (경쟁현황 관련):
 {report_text[:5000]}
@@ -1891,6 +1894,40 @@ NO_DATA_PATTERNS = {
 # 경쟁사 재무 수집
 # =====================================================
 
+def fetch_global_competitor_news(name, max_items=10):
+    """
+    DART 미등록 글로벌 경쟁사의 최근 뉴스를 구글 뉴스로 수집하여 텍스트 요약 반환.
+    한국어 + 영어 쿼리로 실적·매출 관련 뉴스를 우선 수집.
+    """
+    try:
+        items_ko = get_google_news_rss(f"{name} 실적 매출 영업이익", max_items=max_items)
+        items_en = get_google_news_rss(f"{name} revenue earnings results", max_items=max_items)
+        all_items = items_ko + items_en
+
+        seen, lines = set(), []
+        for item in all_items:
+            title = clean_html(item.get('title', '')).strip()
+            date  = (item.get('pubDate') or '')[:10]
+            desc  = clean_html(item.get('description', '') or '').strip()[:120]
+            key   = title[:60]
+            if not title or key in seen:
+                continue
+            seen.add(key)
+            line = f"  [{date}] {title}"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+            if len(lines) >= max_items:
+                break
+
+        if not lines:
+            return ''
+        return f"[{name} — 뉴스 기반 최근 동향]\n" + '\n'.join(lines)
+    except Exception as e:
+        print(f"  [글로벌경쟁사뉴스] {name} 수집 실패: {e}")
+        return ''
+
+
 def fetch_competitor_annual_summary(corp_code, name, current_year):
     """경쟁사 최근 3년 IS 재무 요약 (매출/영업이익)"""
     year_lines = []
@@ -2124,18 +2161,28 @@ def run_analysis(spreadsheet):
         if competitor_names:
             print(f"  경쟁사 {len(competitor_names)}개 식별: {', '.join(competitor_names)}")
             summaries = []
+            no_dart_count = 0
             for cname in competitor_names:
                 corp_code_c = get_corp_code_by_name(cname)
                 if not corp_code_c:
-                    print(f"  [경쟁사] {cname}: DART 미등록, 건너뜀 (GPT 보완)")
+                    # DART 미등록(글로벌 기업 등) → 뉴스 수집으로 실데이터 확보
+                    print(f"  [경쟁사] {cname}: DART 미등록 → 뉴스 수집 시도...")
+                    news_summary = fetch_global_competitor_news(cname)
+                    if news_summary:
+                        summaries.append(news_summary)
+                        print(f"  [경쟁사] {cname}: 뉴스 {news_summary.count(chr(10))}건 수집 완료")
+                    else:
+                        summaries.append(f"[{cname}]\n  뉴스 미수집 — GPT 학습 지식으로 보완 필요")
+                    no_dart_count += 1
                     continue
-                print(f"  [경쟁사] {cname} 재무 수집 중...")
+                print(f"  [경쟁사] {cname} DART 재무 수집 중...")
                 summary = fetch_competitor_annual_summary(corp_code_c, cname, current_year)
                 if summary:
                     summaries.append(summary)
                 time.sleep(0.1)
             competitor_financials = '\n\n'.join(summaries)
-            print(f"  ✅ 경쟁사 재무 수집 완료 ({len(summaries)}/{len(competitor_names)}개)")
+            print(f"  ✅ 경쟁사 수집 완료 ({len(summaries)}/{len(competitor_names)}개, "
+                  f"글로벌(뉴스) {no_dart_count}개)")
         else:
             print(f"  ⚠️ 경쟁사 식별 실패, GPT 학습 지식으로 보완")
     except Exception as e:
@@ -2165,6 +2212,27 @@ def run_analysis(spreadsheet):
     except Exception as e:
         print(f"  ⚠️ 현재가 구하기 시트 오류 (시트 없거나 데이터 없음): {e}")
 
+    # ===== 주식분석 산출값 시트 읽기 (시가총액·PER·PBR·투자아이디어) =====
+    valuation_data = {}
+    try:
+        ws_calc = find_worksheet(spreadsheet, '주식분석 산출값')
+        def _cell_val(addr):
+            """셀 값을 문자열로 반환. 빈 값·오류이면 None."""
+            v = ws_calc.acell(addr).value
+            return v.strip() if v and str(v).strip() not in {'', '#N/A', '#REF!', '#VALUE!', '#ERROR!'} else None
+
+        mc   = _cell_val('J24')   # 시가총액
+        per  = _cell_val('J27')   # PER
+        pbr  = _cell_val('N32')   # PBR
+        idea = _cell_val('S31')   # 투자 아이디어
+        if mc:   valuation_data['market_cap'] = mc
+        if per:  valuation_data['per']         = per
+        if pbr:  valuation_data['pbr']         = pbr
+        if idea: valuation_data['user_idea']   = idea
+        print(f"  [산출값] 시가총액={mc} | PER={per} | PBR={pbr} | 아이디어={'있음' if idea else '없음'}")
+    except Exception as e:
+        print(f"  ⚠️ 주식분석 산출값 시트 읽기 실패 (무시): {e}")
+
     # ===== [9/9] WordPress 발행 (선택) =====
     if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
         print(f"\n[9/9] WordPress 발행 중...")
@@ -2172,14 +2240,50 @@ def run_analysis(spreadsheet):
             # 내부링크 후보 조회
             related_posts = get_related_posts(CATEGORY_NAME, exclude_title=company_name)
 
+            # 밸류에이션·투자아이디어를 KO analysis에 주입 (원본 dict 불변 — shallow copy 후 augment)
+            ko_analysis = dict(analysis)
+
+            # FCF 계산 및 주입 (영업활동현금흐름 - CAPEX)
+            fcf_lines = []
+            for _yr, _m in (annual_metrics_by_year or []):
+                _ocf   = _m.get('영업활동현금흐름')
+                _capex = _m.get('CAPEX')
+                if _ocf is not None and _capex is not None:
+                    _fcf = _ocf - _capex
+                    fcf_lines.append(f'{_yr}년 FCF: {_fcf/1e8:.0f}억원 (OCF {_ocf/1e8:.0f} - CAPEX {_capex/1e8:.0f})')
+                elif _ocf is not None:
+                    fcf_lines.append(f'{_yr}년 OCF: {_ocf/1e8:.0f}억원 (CAPEX 데이터 없음)')
+            if fcf_lines:
+                existing_fin = ko_analysis.get('기업 상황 (재무 중심)') or ''
+                fcf_note = '[잉여현금흐름(FCF)]\n' + '\n'.join(f'• {l}' for l in fcf_lines[-3:])
+                # FCF 주석을 기존 내용 앞에 추가 (600자 제한 내 앵글 확보)
+                ko_analysis['기업 상황 (재무 중심)'] = fcf_note + ('\n' + existing_fin if existing_fin else '')
+
+            if valuation_data:
+                val_note = '\n[현재 밸류에이션]'
+                if valuation_data.get('market_cap'): val_note += f'\n• 시가총액: {valuation_data["market_cap"]}억원'
+                if valuation_data.get('per'):         val_note += f'\n• PER: {valuation_data["per"]}배'
+                if valuation_data.get('pbr'):         val_note += f'\n• PBR: {valuation_data["pbr"]}배'
+                if valuation_data.get('user_idea'):   val_note += f'\n[사용자 투자 아이디어]\n{valuation_data["user_idea"]}'
+                existing = ko_analysis.get('기업 상황 (재무 중심)') or ''
+                ko_analysis['기업 상황 (재무 중심)'] = existing + val_note
+
+            # 투자 아이디어를 investment_points 마지막에 추가
+            ko_investment_points = list(investment_points)
+            if valuation_data.get('user_idea'):
+                ko_investment_points.append({
+                    '번호': len(ko_investment_points) + 1,
+                    '투자포인트': f'[투자 아이디어] {valuation_data["user_idea"]}',
+                })
+
             article = generate_wp_article(
                 company_name           = company_name,
                 stock_code             = stock_code,
                 annual_metrics_by_year = annual_metrics_by_year,
-                analysis               = analysis,
+                analysis               = ko_analysis,
                 competition            = competition,
                 news_items             = news_items,
-                investment_points      = investment_points,
+                investment_points      = ko_investment_points,
                 quarterly_by_year      = quarterly_by_year,
                 related_posts          = related_posts,
             )
@@ -2214,7 +2318,40 @@ def run_analysis(spreadsheet):
             print(f"  슬러그: {article.get('slug', '-')}")
             _send_publish_notification(company_name, article.get('focus_keyword', ''), post_url)
         except Exception as e:
-            print(f"  ⚠️ WordPress 발행 실패 (분석은 정상 완료됨): {e}")
+            print(f"  ⚠️ KO WordPress 발행 실패 (분석은 정상 완료됨): {e}")
+
+        # ── EN 발행 (KO 결과 무관, 독립 실행) ──────────────────────────────
+        try:
+            print(f"\n  [EN] Global Research 카테고리 발행 중...")
+            peer_map   = load_peer_mapping()
+            peers      = peer_map.get(stock_code, {})
+            en_article = generate_en_article(
+                company_name           = company_name,
+                stock_code             = stock_code,
+                annual_metrics_by_year = annual_metrics_by_year,
+                analysis               = analysis,
+                competition            = competition,
+                news_items             = news_items,
+                investment_points      = investment_points,
+                quarterly_by_year      = quarterly_by_year,
+                related_posts          = related_posts,
+                peers                  = peers,
+                valuation_data         = valuation_data,
+            )
+            en_url = publish_post_en(
+                article      = en_article,
+                company_data = {
+                    'company_name':        company_name,
+                    'stock_code':          stock_code,
+                    'annual_financials':   en_article['annual_financials'],
+                    'quarterly_financials': en_article['quarterly_financials'],
+                },
+            )
+            print(f"  ✅ EN WordPress 발행 완료: {en_url}")
+            print(f"  EN 포커스 키워드: {en_article.get('focus_keyword', '-')}")
+            print(f"  EN 슬러그: {en_article.get('slug', '-')}")
+        except Exception as e:
+            print(f"  ⚠️ EN WordPress 발행 실패 (KO 결과에 영향 없음): {e}")
     else:
         print("\n[9/9] WordPress 설정 없음 — 발행 스킵")
 

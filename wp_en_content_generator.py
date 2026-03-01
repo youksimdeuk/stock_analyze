@@ -126,9 +126,13 @@ def _build_competition_en(competition: dict, max_peers: int = 6) -> str:
 def _build_news_en(news_items: list, investment_points: list, max_items: int = 10) -> str:
     """Format recent news + investment points for English GPT prompt."""
     ip_map = {}
-    for ip in (investment_points or []):
-        num = str(ip.get('번호', ''))
-        pt  = ip.get('투자포인트', '')
+    for i, ip in enumerate(investment_points or []):
+        if isinstance(ip, dict):
+            num = str(ip.get('번호', i + 1))
+            pt  = ip.get('투자포인트', '')
+        else:
+            num = str(i + 1)
+            pt  = str(ip)
         if num and pt:
             ip_map[num] = pt
 
@@ -301,7 +305,7 @@ After the HTML body, output these blocks EXACTLY:
 
 <SEO_TITLE>{company} Stock Analysis [YEAR] | Revenue, Margin & Valuation</SEO_TITLE>
 <SEO_DESCRIPTION>Under 155 characters. Include: {company} + sector + key metric + main risk.</SEO_DESCRIPTION>
-<SLUG>{ticker.lower()}-stock-analysis-{slug_sfx}</SLUG>
+<SLUG>{ticker.lower()}-en-stock-analysis-{slug_sfx}</SLUG>
 <FOCUS_KEYWORD>{company} stock analysis</FOCUS_KEYWORD>
 <TAGS>Korea stock, {ticker}, {company}, stock analysis, Korean equity</TAGS>
 <FAQ_JSON>[{{"question": "...", "answer": "..."}}]</FAQ_JSON>
@@ -474,7 +478,7 @@ def generate_en_article(
     if not seo_title:
         seo_title = f'{company_name} Stock Analysis {year} | Korea Equity Research'
     if not slug:
-        slug = f'{stock_code}-stock-analysis-{datetime.now().strftime("%Y-%m")}'
+        slug = f'{stock_code}-en-stock-analysis-{datetime.now().strftime("%Y-%m")}'
     if not focus_keyword:
         focus_keyword = f'{company_name} stock analysis'
     if not meta_description:

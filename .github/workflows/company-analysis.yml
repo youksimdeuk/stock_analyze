@@ -26,12 +26,15 @@ jobs:
     env:
       DART_API_KEY: ${{ secrets.DART_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_TIMEOUT: "120"
+      OPENAI_ATTEMPTS: "2"
       NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
       NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
       GOOGLE_TOKEN_JSON: ${{ secrets.GOOGLE_TOKEN_JSON }}
       GOOGLE_CREDENTIALS_PATH: credentials.json
       GOOGLE_TOKEN_PATH: token.json
+      PYTHONUNBUFFERED: "1"
       TARGET_SPREADSHEET_ID: ${{ github.event.inputs.target_spreadsheet_id }}
       FORCE_REANALYZE: ${{ github.event.inputs.force_reanalyze }}
       WP_URL: ${{ secrets.WP_URL }}
@@ -71,4 +74,4 @@ jobs:
           PY
 
       - name: Run analysis
-        run: python main.py
+        run: python -u main.py

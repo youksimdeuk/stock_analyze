@@ -1,4 +1,4 @@
-"""
+﻿"""
 기업분석 자동화 스크립트
 - DART API: 재무 데이터 수집
 - 네이버 뉴스 API: 뉴스 수집
@@ -44,13 +44,16 @@ from wp_publisher import publish_post_en
 from db import upsert_post, update_post, log_publish, get_latest_post_by_stock, is_channel_published
 from naver_content_generator import generate_naver_post, save_naver_post
 
+OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))
+OPENAI_ATTEMPTS = max(1, int(os.getenv("OPENAI_ATTEMPTS", "2")))
+
 
 def _send_publish_notification(company_name, focus_keyword, post_url):
     """발행 완료 시 Slack/Discord Webhook 알림 (PUBLISH_WEBHOOK_URL 없으면 스킵)"""
     if not PUBLISH_WEBHOOK_URL:
         return
     try:
-        msg = f"[기업분석] {company_name} 발행 완료\n키워드: {focus_keyword}\nURL: {post_url}"
+        msg = f"[기업분석] {company_name} 발행 완료`n키워드: {focus_keyword}`nURL: {post_url}"
         if 'discord.com' in PUBLISH_WEBHOOK_URL:
             payload = {'content': msg}
         else:
@@ -403,7 +406,7 @@ def get_corp_code_by_name(name):
 
 def extract_competitor_names(report_text, news_items, company_name, max_count=7):
     """사업보고서 + 뉴스에서 주요 경쟁사 기업명 GPT 추출 (국내+글로벌 포함)"""
-    news_text = "\n".join([
+    news_text = "`n".join([
         clean_html(item.get('title', ''))
         for item in news_items[:20]
     ])
@@ -1151,7 +1154,7 @@ def build_financial_context_text(annual_metrics_by_year, quarterly_by_year):
                 )
             if q_lines:
                 lines.append(f"- {year}: " + " | ".join(q_lines))
-    return "\n".join(lines)
+    return "`n".join(lines)
 
 
 def format_korean_date(value):
@@ -1206,7 +1209,7 @@ def find_worksheet(spreadsheet, canonical_name, create_if_missing=False, rows=20
 def to_multiline_numbered(values):
     if isinstance(values, list):
         cleaned = [str(v).strip() for v in values if str(v).strip()]
-        return "\n".join([f"{i + 1}. {v}" for i, v in enumerate(cleaned)])
+        return "`n".join([f"{i + 1}. {v}" for i, v in enumerate(cleaned)])
     text = str(values or '').strip()
     return text
 
@@ -1397,7 +1400,7 @@ def fetch_naver_research_reports(company_name, count=3, max_chars_per_report=500
             if pdf_r.status_code != 200:
                 continue
             with pdfplumber.open(io.BytesIO(pdf_r.content)) as pdf:
-                text = '\n'.join(
+                text = '`n'.join(
                     p.extract_text() or '' for p in pdf.pages[:15]
                 )[:max_chars_per_report]
             if not text.strip():
@@ -1413,19 +1416,19 @@ def fetch_naver_research_reports(company_name, count=3, max_chars_per_report=500
                 'published_dt': parse_news_date(entry['date']),
                 'source':       '증권사리포트',
             })
-            combined_texts.append(f"【{display_title} | {entry['date']}】\n{text}")
+            combined_texts.append(f"【{display_title} | {entry['date']}】`n{text}")
             print(f"  ✅ 리포트: {entry['title'][:40]} ({len(text)}자)")
         except Exception as e:
             print(f"  [경고] PDF 처리 실패 ({entry['title'][:30]}): {e}")
 
-    return report_items, '\n\n'.join(combined_texts)
+    return report_items, '`n`n'.join(combined_texts)
 
 
 # =====================================================
 # OpenAI 분석
 # =====================================================
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=180.0, max_retries=0)
+openai_client = OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_TIMEOUT, max_retries=0)
 OPENAI_MODEL_PRIMARY = 'gpt-5-mini'
 OPENAI_MODEL_FALLBACK = 'gpt-5-nano'
 
@@ -1449,7 +1452,7 @@ def extract_message_text(message):
             text = getattr(item, 'text', None)
             if text:
                 parts.append(str(text))
-        return "\n".join(parts).strip()
+        return "`n".join(parts).strip()
 
     return str(content or '').strip()
 
@@ -1497,7 +1500,7 @@ def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
     for model in models:
         for use_json_format in (True, False):
             mode_label = "json_format" if use_json_format else "text_format"
-            for attempt in range(1, 4):
+            for attempt in range(1, OPENAI_ATTEMPTS + 1):
                 try:
                     kwargs = {
                         'model': model,
@@ -1521,7 +1524,7 @@ def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
                     msg = str(e)
                     err_type = type(e).__name__
                     print(f"  [재시도] {task_label} {model} {mode_label} {attempt}/3 실패: {err_type}: {msg}")
-                    if attempt < 3:
+                    if attempt < OPENAI_ATTEMPTS:
                         time.sleep(1.0 * attempt)
                         continue
         # primary 모델 실패 시 fallback 모델로 진행
@@ -1537,7 +1540,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
         link = item.get('link') or item.get('originallink') or ''
         dt = item.get('pubDate', '')
         news_lines.append(f"- ({dt}) [{title}] {desc} | 링크: {link if link else '[링크 없음]'}")
-    news_text = "\n".join(news_lines)
+    news_text = "`n".join(news_lines)
 
     prompt = f"""당신은 한국 주식 투자 리서치 전문가입니다.
 아래 제공된 자료를 최대한 활용하고, 부족한 부분은 학습 지식으로 보완하되 "(추정)" 표기하세요.
@@ -1640,18 +1643,18 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 - 반드시 순수 JSON 형식으로만 반환 (마크다운 코드블록 사용 금지):
 
 {{
-  "산업 개요": "• ...\n• ...\n• ...",
-  "산업 구조 및 특징": "• ...\n• ...\n• ...",
-  "산업 현재 업황": "• ...\n• ...\n• ...",
-  "기업의 해자(경쟁우위)": "• ...\n• ...\n• ...",
-  "주요 제품": "• ...\n• ...",
-  "주요 제품 설명": "• ...\n• ...",
-  "주요 원재료 및 원가 구조": "• ...\n• ...",
-  "주요 고객 구조": "• ...\n• ...",
-  "기업 상황 (재무 중심)": "• ...\n• ...\n• ...",
-  "매출 구조 및 이익 변동 요인": "• ...\n• ...\n• ...",
-  "최신 기술 트렌드": "• ...\n• ...",
-  "투자 관점 핵심 리스크": "• ...\n• ...\n• ..."
+  "산업 개요": "• ...`n• ...`n• ...",
+  "산업 구조 및 특징": "• ...`n• ...`n• ...",
+  "산업 현재 업황": "• ...`n• ...`n• ...",
+  "기업의 해자(경쟁우위)": "• ...`n• ...`n• ...",
+  "주요 제품": "• ...`n• ...",
+  "주요 제품 설명": "• ...`n• ...",
+  "주요 원재료 및 원가 구조": "• ...`n• ...",
+  "주요 고객 구조": "• ...`n• ...",
+  "기업 상황 (재무 중심)": "• ...`n• ...`n• ...",
+  "매출 구조 및 이익 변동 요인": "• ...`n• ...`n• ...",
+  "최신 기술 트렌드": "• ...`n• ...",
+  "투자 관점 핵심 리스크": "• ...`n• ...`n• ..."
 }}"""
 
     try:
@@ -1662,7 +1665,7 @@ def generate_industry_analysis(company_name, stock_code, news_items, financial_s
 
 def generate_competition_analysis(company_name, stock_code, news_items, financial_summary, report_text='', disclosure_titles='', competitor_financials='', research_text=''):
     """경쟁현황 시트 내용 생성"""
-    news_text = "\n".join([
+    news_text = "`n".join([
         f"- {clean_html(item.get('title',''))}: {clean_html(item.get('description',''))[:120]}"
         for item in news_items[:40]
     ])
@@ -1687,7 +1690,7 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
 ■ 분석 대상 기업 DART 재무데이터:
 {financial_summary if financial_summary else '[재무 데이터 없음]'}
 
-■ 경쟁사 DART 재무데이터 (직접 수집):
+■ 경쟁사 재무데이터 (DART/Yahoo Finance 직접 수집):
 {competitor_financials if competitor_financials else '[경쟁사 재무 데이터 없음 - 학습 지식으로 보완하세요]'}
 
 ■ 최근 뉴스:
@@ -1704,15 +1707,15 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
     {{
       "기업명": "{company_name}",
       "국가": "한국",
-      "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
-      "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
+      "최근3년매출액": "2022: OOO억원\`n2023: OOO억원\`n2024: OOO억원",
+      "최근3년영업이익": "2022: OOO억원\`n2023: OOO억원\`n2024: OOO억원",
       "시장점유율(%)": "OO%(추정)",
       "순위(국내/글로벌)": "국내 O위 / 글로벌 O위(추정)",
       "주요 제품(매출액/비중)": "제품명 (매출액 OOO억원 / OO%)",
       "강점": "내용",
       "약점/리스크": "내용",
       "CAPEX/증설": "내용",
-      "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\\n2. ...",
+      "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\`n2. ...",
       "뉴스 원본 링크": "https://...",
       "투자 고민 포인트": "• 체크포인트",
       "비고": "환산기준/추가메모"
@@ -1720,15 +1723,15 @@ def generate_competition_analysis(company_name, stock_code, news_items, financia
     {{
       "기업명": "경쟁사명",
       "국가": "한국 / 미국 / 일본 등",
-      "최근3년매출액": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
-      "최근3년영업이익": "2022: OOO억원\\n2023: OOO억원\\n2024: OOO억원",
+      "최근3년매출액": "2022: OOO억원\`n2023: OOO억원\`n2024: OOO억원",
+      "최근3년영업이익": "2022: OOO억원\`n2023: OOO억원\`n2024: OOO억원",
       "시장점유율(%)": "OO%(추정)",
       "순위(국내/글로벌)": "국내 O위 / 글로벌 O위(추정)",
       "주요 제품(매출액/비중)": "제품명 (비중 OO%)",
       "강점": "내용",
       "약점/리스크": "내용",
       "CAPEX/증설": "내용",
-      "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\\n2. ...",
+      "최근3년 기업활동 뉴스": "1. YYYY-MM-DD 뉴스요약\`n2. ...",
       "뉴스 원본 링크": "",
       "투자 고민 포인트": "• 체크포인트",
       "비고": "환산기준/추가메모"
@@ -1751,7 +1754,7 @@ def generate_news_investment_points(news_items, company_name):
         f"{i+1}. [{clean_html(item.get('title',''))}] {clean_html(item.get('description',''))[:150]}"
         for i, item in enumerate(news_items[:20])
     ]
-    news_text = "\n".join(news_list)
+    news_text = "`n".join(news_list)
 
     prompt = f"""{company_name} 관련 뉴스 목록입니다.
 각 뉴스에 대해 투자자 관점의 핵심 포인트를 한 줄로 작성해주세요.
@@ -1836,7 +1839,7 @@ def write_news_data(ws, news_items, investment_points):
         desc = clean_html(item.get('description', ''))[:300]
         link = item.get('originallink') or item.get('link') or item.get('url') or ''
         point = investment_points[i] if i < len(investment_points) else ''
-        summary = f"{title}\n{desc}".strip()
+        summary = f"{title}`n{desc}".strip()
         rows.append([pub_date, summary, to_hyperlink_formula(link, '원문링크', arg_sep=arg_sep) if link else '', point or '', ''])
 
     if rows:
@@ -1906,7 +1909,7 @@ def fetch_global_competitor_news(name, max_items=10):
 
         if not lines:
             return ''
-        return f"[{name} — 뉴스 기반 최근 동향]\n" + '\n'.join(lines)
+        return f"[{name} — 뉴스 기반 최근 동향]`n" + '`n'.join(lines)
     except Exception as e:
         print(f"  [글로벌경쟁사뉴스] {name} 수집 실패: {e}")
         return ''
@@ -1944,10 +1947,222 @@ JSON만 반환:
             lines.append(line)
         if not lines:
             return ''
-        return f"[{name} — 뉴스 기반 재무 (실수치)]\n" + '\n'.join(lines)
+        return f"[{name} — 뉴스 기반 재무 (실수치)]`n" + '`n'.join(lines)
     except Exception as e:
         print(f"  [글로벌재무추출] {name} 실패: {e}")
         return ''
+
+
+# =====================================================
+# Yahoo Finance (글로벌 경쟁사 재무)
+# =====================================================
+
+_YAHOO_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+}
+
+_FX_CACHE = {}
+
+def _format_large_number(value):
+    try:
+        n = float(value)
+    except Exception:
+        return str(value)
+    abs_n = abs(n)
+    if abs_n >= 1e12:
+        return f"{n/1e12:.2f}T"
+    if abs_n >= 1e9:
+        return f"{n/1e9:.2f}B"
+    if abs_n >= 1e6:
+        return f"{n/1e6:.2f}M"
+    if abs_n >= 1e3:
+        return f"{n/1e3:.2f}K"
+    return f"{n:.0f}"
+
+def _format_krw_eok(value):
+    try:
+        n = float(value)
+    except Exception:
+        return ''
+    return f"{n/1e8:.0f}억원"
+
+
+def _fetch_fx_rate(base: str, quote: str = "KRW"):
+    if not base:
+        return None
+    base = base.upper()
+    quote = quote.upper()
+    if base == quote:
+        return 1.0
+    cache_key = f"{base}_{quote}"
+    if cache_key in _FX_CACHE:
+        return _FX_CACHE[cache_key]
+    # Env override, e.g. FX_USD_KRW=1325.5
+    env_key = f"FX_{base}_{quote}"
+    env_val = os.getenv(env_key, "").strip()
+    if env_val:
+        try:
+            rate = float(env_val)
+            _FX_CACHE[cache_key] = rate
+            return rate
+        except Exception:
+            pass
+    try:
+        url = f"https://api.exchangerate.host/latest?base={base}&symbols={quote}"
+        r = requests.get(url, headers=_YAHOO_HEADERS, timeout=10)
+        data = r.json()
+        rate = (data.get("rates") or {}).get(quote)
+        if rate:
+            _FX_CACHE[cache_key] = float(rate)
+            return float(rate)
+    except Exception as e:
+        print(f"  [환율] {base}->{quote} 조회 실패: {e}")
+    return None
+
+
+def yahoo_search_symbol(name: str):
+    """Yahoo Finance 검색 API로 기업명 -> 심볼 매핑."""
+    if not name:
+        return None
+    try:
+        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={quote_plus(name)}"
+        r = requests.get(url, headers=_YAHOO_HEADERS, timeout=10)
+        data = r.json()
+        quotes = data.get('quotes') or []
+        for q in quotes:
+            if q.get('quoteType') != 'EQUITY':
+                continue
+            symbol = q.get('symbol')
+            if symbol:
+                return symbol
+    except Exception as e:
+        print(f"  [Yahoo검색] {name} 실패: {e}")
+    return None
+
+
+def fetch_yahoo_financials(symbol: str, name: str) -> str:
+    """Yahoo Finance income statement에서 최근 3년 매출/영업이익 추출."""
+    if not symbol:
+        return ''
+    try:
+        url = (
+            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            f"?modules=incomeStatementHistory,financialData,price"
+        )
+        r = requests.get(url, headers=_YAHOO_HEADERS, timeout=10)
+        data = r.json()
+        result = (data.get('quoteSummary') or {}).get('result') or []
+        if not result:
+            return ''
+        r0 = result[0]
+        ish = (r0.get('incomeStatementHistory') or {}).get('incomeStatementHistory') or []
+        if not ish:
+            return ''
+        currency = (
+            (r0.get('incomeStatementHistory') or {}).get('currencyCode')
+            or (r0.get('financialData') or {}).get('currency')
+            or (r0.get('price') or {}).get('currency')
+            or ''
+        )
+        fx_rate = _fetch_fx_rate(currency, "KRW") if currency else None
+        lines = []
+        for item in ish[:3]:
+            end = (item.get('endDate') or {}).get('raw')
+            year = datetime.fromtimestamp(end).year if end else ''
+            rev = (item.get('totalRevenue') or {}).get('raw')
+            op = (item.get('operatingIncome') or {}).get('raw')
+            if not year:
+                continue
+            if fx_rate and rev is not None:
+                rev_krw = rev * fx_rate
+                line = f"  {year}: 매출 {_format_krw_eok(rev_krw)}"
+                if op is not None:
+                    op_krw = op * fx_rate
+                    line += f", 영업이익 {_format_krw_eok(op_krw)}"
+                line += f" (원화환산, 원천 {_format_large_number(rev)} {currency})"
+            else:
+                line = f"  {year}: 매출 {_format_large_number(rev)}"
+                if currency:
+                    line += f" {currency}"
+                if op is not None:
+                    line += f", 영업이익 {_format_large_number(op)}"
+                    if currency:
+                        line += f" {currency}"
+            lines.append(line)
+        if not lines:
+            return ''
+        return f"[{name} Yahoo Finance]\n" + "\n".join(lines)
+    except Exception as e:
+        print(f"  [Yahoo재무] {name}({symbol}) 실패: {e}")
+        return ''
+
+
+def fetch_yahoo_financials_by_name(name: str) -> str:
+    symbol = yahoo_search_symbol(name)
+    if not symbol:
+        return ''
+    return fetch_yahoo_financials(symbol, name)
+
+
+def _normalize_competitor_name(value: str) -> str:
+    if not value:
+        return ''
+    v = re.sub(r'[\s\.\,\-_/]', '', str(value))
+    v = re.sub(r'^(주식회사|\(주\)|주\.)', '', v, flags=re.IGNORECASE)
+    v = re.sub(r'(주식회사|\(주\)|주\.)$', '', v, flags=re.IGNORECASE)
+    return v.lower()
+
+
+def _parse_competitor_financials(text: str):
+    """summaries 텍스트에서 경쟁사별 3년 매출/영업이익 라인 추출."""
+    if not text:
+        return {}
+    blocks = re.split(r'\n\[(.+?)\]\n', text)
+    # split 결과: [prefix, name1, body1, name2, body2, ...]
+    result = {}
+    if len(blocks) < 3:
+        return result
+    for i in range(1, len(blocks), 2):
+        name = blocks[i].strip()
+        body = blocks[i + 1] if i + 1 < len(blocks) else ''
+        rev_lines = []
+        op_lines = []
+        for line in body.splitlines():
+            m = re.search(r'(\d{4}).*매출\s+([\d,]+)억원', line)
+            if m:
+                rev_lines.append(f"{m.group(1)}: {m.group(2)}억원")
+            m2 = re.search(r'(\d{4}).*영업이익\s+([\d,]+)억원', line)
+            if m2:
+                op_lines.append(f"{m2.group(1)}: {m2.group(2)}억원")
+        if rev_lines or op_lines:
+            result[_normalize_competitor_name(name)] = {
+                'name': name,
+                'revenue': "\n".join(rev_lines),
+                'operating': "\n".join(op_lines),
+            }
+    return result
+
+
+def _apply_competitor_financials(competition: dict, competitor_financials: str):
+    """GPT 결과에 실데이터를 덮어씌워 '추정' 표기 제거."""
+    if not competition or not competitor_financials:
+        return competition
+    data_map = _parse_competitor_financials(competitor_financials)
+    if not data_map:
+        return competition
+    competitors = competition.get('경쟁사목록', [])
+    for c in competitors:
+        name = str(c.get('기업명', '') or '').strip()
+        key = _normalize_competitor_name(name)
+        if not key or key not in data_map:
+            continue
+        item = data_map[key]
+        if item.get('revenue'):
+            c['최근3년매출액'] = item['revenue']
+        if item.get('operating'):
+            c['최근3년영업이익'] = item['operating']
+    competition['경쟁사목록'] = competitors
+    return competition
 
 
 def fetch_competitor_annual_summary(corp_code, name, current_year):
@@ -1981,7 +2196,7 @@ def fetch_competitor_annual_summary(corp_code, name, current_year):
         time.sleep(0.2)
     if not year_lines:
         return ''
-    return f"[{name}]\n" + '\n'.join(year_lines)
+    return f"[{name}]`n" + '`n'.join(year_lines)
 
 
 
@@ -2085,9 +2300,9 @@ def _generate_investment_rating(company_name, annual_metrics_by_year, investment
         for p in investment_points[:3]
     )
     prompt = (
-        f"{company_name} 투자 의견을 Buy / Neutral / Watch 중 하나로만 답하라.\n"
-        f"재무: {', '.join(fin_lines)}\n"
-        f"투자포인트: {ip_text}\n"
+        f"{company_name} 투자 의견을 Buy / Neutral / Watch 중 하나로만 답하라.`n"
+        f"재무: {', '.join(fin_lines)}`n"
+        f"투자포인트: {ip_text}`n"
         f"규칙: 단어 하나만 출력"
     )
     try:
@@ -2128,7 +2343,7 @@ def run_analysis(spreadsheet):
     if not stock_code:
         raise RuntimeError("corp_map!A2 종목코드(6자리)가 비어 있습니다.")
 
-    print(f"\n분석 대상: {company_name} (종목코드: {stock_code})")
+    print(f"`n분석 대상: {company_name} (종목코드: {stock_code})")
     _period_key = datetime.now().strftime("%Y-%m")
     _db_post_id = None
 
@@ -2147,7 +2362,7 @@ def run_analysis(spreadsheet):
             return False
 
     # ===== 연간 재무 데이터 =====
-    print("\n[1/7] 연간 재무 데이터 수집 중...")
+    print("`n[1/7] 연간 재무 데이터 수집 중...")
     ws_stock = find_worksheet(spreadsheet, '주식분석 값 입력')
     current_year = datetime.now().year
     financial_summary_parts = []
@@ -2185,10 +2400,10 @@ def run_analysis(spreadsheet):
             print("데이터 없음")
         time.sleep(0.1)
 
-    financial_summary = "\n".join(financial_summary_parts)
+    financial_summary = "`n".join(financial_summary_parts)
 
     # ===== 분기 재무 데이터 =====
-    print("\n[2/7] 분기별 재무 데이터 수집 중...")
+    print("`n[2/7] 분기별 재무 데이터 수집 중...")
     for year in range(2020, current_year + 1):
         print(f"  {year}년 분기 데이터 조회 중...")
         # current_year는 이미 탐색된 fs_div/sj_div 재사용 (중복 탐색 방지)
@@ -2200,12 +2415,12 @@ def run_analysis(spreadsheet):
         time.sleep(0.3)
 
     # ===== 뉴스 수집 =====
-    print(f"\n[3/8] 뉴스 수집 중... ({company_name})")
+    print(f"`n[3/8] 뉴스 수집 중... ({company_name})")
     news_items = collect_news_items(company_name, min_count=MIN_NEWS_COUNT)
     print(f"  ✅ {len(news_items)}개 뉴스 수집 (국내+해외, 5년 이내)")
 
     # ===== 증권사 리포트 수집 =====
-    print(f"\n[4/8] 증권사 리포트 수집 중... ({company_name})")
+    print(f"`n[4/8] 증권사 리포트 수집 중... ({company_name})")
     research_items, research_text = fetch_naver_research_reports(company_name, count=3, max_chars_per_report=20000)
     if research_items:
         print(f"  ✅ 리포트 {len(research_items)}개 수집 완료")
@@ -2222,9 +2437,9 @@ def run_analysis(spreadsheet):
     print("  ✅ 뉴스수집 시트 입력 완료")
 
     # ===== DART 공시 및 사업보고서 원문 수집 =====
-    print(f"\n[5/8] DART 공시 및 사업보고서 원문 수집 중...")
+    print(f"`n[5/8] DART 공시 및 사업보고서 원문 수집 중...")
     disclosures = get_dart_disclosures(corp_code, count=20)
-    disclosure_titles = "\n".join([
+    disclosure_titles = "`n".join([
         f"- {d.get('rcept_dt','')} [{d.get('report_nm','')}]"
         for d in disclosures
     ])
@@ -2236,7 +2451,7 @@ def run_analysis(spreadsheet):
     print(f"  ✅ 사업보고서 원문 {len(report_text)}자 추출" if report_text else "  ⚠️ 사업보고서 원문 없음")
 
     # ===== 산업/기업 분석 =====
-    print("\n[6/8] 산업 및 기업 분석 생성 중...")
+    print("`n[6/8] 산업 및 기업 분석 생성 중...")
     analysis = generate_industry_analysis(
         company_name, stock_code, news_items, financial_summary,
         report_text=report_text[:15000], disclosure_titles=disclosure_titles,
@@ -2250,7 +2465,7 @@ def run_analysis(spreadsheet):
     print("  ✅ 산업 이해 및 기업 상황 시트 입력 완료")
 
     # ===== 경쟁사 재무 수집 (사업보고서/뉴스 기반) =====
-    print("\n[7/8] 경쟁현황 분석 생성 중...")
+    print("`n[7/8] 경쟁현황 분석 생성 중...")
     competitor_financials = ''
     try:
         competitor_names = extract_competitor_names(report_text, news_items, company_name)
@@ -2261,27 +2476,34 @@ def run_analysis(spreadsheet):
             for cname in competitor_names:
                 corp_code_c = get_corp_code_by_name(cname)
                 if not corp_code_c:
-                    # DART 미등록(글로벌 기업 등) → 뉴스 수집으로 실데이터 확보
-                    print(f"  [경쟁사] {cname}: DART 미등록 → 뉴스 수집 시도...")
+                    # DART 미등록(글로벌 기업 등) → Yahoo Finance 우선 시도
+                    print(f"  [경쟁사] {cname}: DART 미등록 → Yahoo Finance 수집 시도...")
+                    yahoo_summary = fetch_yahoo_financials_by_name(cname)
+                    if yahoo_summary:
+                        summaries.append(yahoo_summary)
+                        print(f"  [경쟁사] {cname}: Yahoo Finance 재무 추출 완료")
+                        no_dart_count += 1
+                        continue
+                    # Yahoo 실패 시 뉴스 수집으로 보완
+                    print(f"  [경쟁사] {cname}: Yahoo 실패 → 뉴스 수집 시도...")
                     news_summary = fetch_global_competitor_news(cname)
                     if news_summary:
                         fin_summary = extract_global_financials_from_news(cname, news_summary)
                         if fin_summary:
-                            summaries.append(fin_summary + '\n' + news_summary)
+                            summaries.append(fin_summary + '`n' + news_summary)
                             print(f"  [경쟁사] {cname}: 뉴스 재무 추출 완료")
                         else:
                             summaries.append(news_summary)
                             print(f"  [경쟁사] {cname}: 뉴스 수집 완료 (재무 수치 미발견)")
                     else:
-                        summaries.append(f"[{cname}]\n  뉴스 미수집 — GPT 학습 지식으로 보완 필요")
+                        summaries.append(f"[{cname}]`n  뉴스 미수집 -> GPT 학습 지식으로 보완 필요")
                     no_dart_count += 1
-                    continue
-                print(f"  [경쟁사] {cname} DART 재무 수집 중...")
+                    continue                print(f"  [경쟁사] {cname} DART 재무 수집 중...")
                 summary = fetch_competitor_annual_summary(corp_code_c, cname, current_year)
                 if summary:
                     summaries.append(summary)
                 time.sleep(0.1)
-            competitor_financials = '\n\n'.join(summaries)
+            competitor_financials = '`n`n'.join(summaries)
             print(f"  ✅ 경쟁사 수집 완료 ({len(summaries)}/{len(competitor_names)}개, "
                   f"글로벌(뉴스) {no_dart_count}개)")
         else:
@@ -2295,12 +2517,13 @@ def run_analysis(spreadsheet):
         competitor_financials=competitor_financials,
         research_text=research_text,
     )
+    competition = _apply_competitor_financials(competition, competitor_financials)
     ws_competition = find_worksheet(spreadsheet, '경쟁현황', create_if_missing=True)
     write_competition_data(ws_competition, competition, company_name)
     print("  ✅ 경쟁현황 시트 입력 완료")
 
     # ===== 현재가 구하기 시트 =====
-    print("\n[8/8] 현재가 구하기 시트 데이터 수집 중...")
+    print("`n[8/8] 현재가 구하기 시트 데이터 수집 중...")
     try:
         ws_price = find_worksheet(spreadsheet, '현재가 구하기')
         year_bs, reprt_bs, fs_div_bs, bs_data = detect_latest_bs(corp_code)
@@ -2354,7 +2577,7 @@ def run_analysis(spreadsheet):
 
     # ===== [9/9] WordPress 발행 (선택) =====
     if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
-        print(f"\n[9/9] WordPress 발행 중...")
+        print(f"`n[9/9] WordPress 발행 중...")
         try:
             # 내부링크 후보 조회
             related_posts = get_related_posts(CATEGORY_NAME, exclude_title=company_name)
@@ -2374,16 +2597,16 @@ def run_analysis(spreadsheet):
                     fcf_lines.append(f'{_yr}년 OCF: {_ocf/1e8:.0f}억원 (CAPEX 데이터 없음)')
             if fcf_lines:
                 existing_fin = ko_analysis.get('기업 상황 (재무 중심)') or ''
-                fcf_note = '[잉여현금흐름(FCF)]\n' + '\n'.join(f'• {l}' for l in fcf_lines[-3:])
+                fcf_note = '[잉여현금흐름(FCF)]`n' + '`n'.join(f'• {l}' for l in fcf_lines[-3:])
                 # FCF 주석을 기존 내용 앞에 추가 (600자 제한 내 앵글 확보)
-                ko_analysis['기업 상황 (재무 중심)'] = fcf_note + ('\n' + existing_fin if existing_fin else '')
+                ko_analysis['기업 상황 (재무 중심)'] = fcf_note + ('`n' + existing_fin if existing_fin else '')
 
             if valuation_data:
-                val_note = '\n[현재 밸류에이션]'
-                if valuation_data.get('market_cap'): val_note += f'\n• 시가총액: {valuation_data["market_cap"]}억원'
-                if valuation_data.get('per'):         val_note += f'\n• PER: {valuation_data["per"]}배'
-                if valuation_data.get('pbr'):         val_note += f'\n• PBR: {valuation_data["pbr"]}배'
-                if valuation_data.get('user_idea'):   val_note += f'\n[사용자 투자 아이디어]\n{valuation_data["user_idea"]}'
+                val_note = '`n[현재 밸류에이션]'
+                if valuation_data.get('market_cap'): val_note += f'`n• 시가총액: {valuation_data["market_cap"]}억원'
+                if valuation_data.get('per'):         val_note += f'`n• PER: {valuation_data["per"]}배'
+                if valuation_data.get('pbr'):         val_note += f'`n• PBR: {valuation_data["pbr"]}배'
+                if valuation_data.get('user_idea'):   val_note += f'`n[사용자 투자 아이디어]`n{valuation_data["user_idea"]}'
                 existing = ko_analysis.get('기업 상황 (재무 중심)') or ''
                 ko_analysis['기업 상황 (재무 중심)'] = existing + val_note
 
@@ -2465,7 +2688,7 @@ def run_analysis(spreadsheet):
 
         # ── EN 발행 (KO 결과 무관, 독립 실행) ──────────────────────────────
         try:
-            print(f"\n  [EN] Global Research 카테고리 발행 중...")
+            print(f"`n  [EN] Global Research 카테고리 발행 중...")
             peer_map   = load_peer_mapping()
             peers      = peer_map.get(stock_code, {})
             en_article = generate_en_article(
@@ -2507,9 +2730,9 @@ def run_analysis(spreadsheet):
             print(f"  ⚠️ EN WordPress 발행 실패 (KO 결과에 영향 없음): {e}")
             log_publish(_db_post_id, 'wp_en', 'failed', error=str(e))
     else:
-        print("\n[9/9] WordPress 설정 없음 — 발행 스킵")
+        print("`n[9/9] WordPress 설정 없음 — 발행 스킵")
 
-    print("\n" + "=" * 50)
+    print("`n" + "=" * 50)
     print(f"✅ {company_name} 분석 완료!")
     print("=" * 50)
     return True
@@ -2605,7 +2828,7 @@ def run_all_pending(gc):
     }
 
     if target_id:
-        print(f"\n[직접실행] TARGET_SPREADSHEET_ID 지정됨: {target_id}")
+        print(f"`n[직접실행] TARGET_SPREADSHEET_ID 지정됨: {target_id}")
         try:
             spreadsheet = gc.open_by_key(target_id)
             summary['found'] = 1
@@ -2627,7 +2850,7 @@ def run_all_pending(gc):
             summary['failed'] += 1
             return summary
 
-    print(f"\n[스캔] '-기업분석' 시트 검색 중...")
+    print(f"`n[스캔] '-기업분석' 시트 검색 중...")
     all_files = find_analysis_spreadsheets(gc)
     if not all_files:
         print("  '-기업분석'으로 끝나는 시트가 없습니다.")
@@ -2650,7 +2873,7 @@ def run_all_pending(gc):
                     print(f"  [{f['name']}] 이미 완료됨. 건너뜀. (FORCE_REANALYZE 미지정)")
                     summary['skipped'] += 1
                     continue
-            print(f"\n  [{f['name']}] 분석 시작!")
+            print(f"`n  [{f['name']}] 분석 시작!")
             ok = run_analysis(spreadsheet)
             if ok:
                 summary['processed'] += 1
@@ -2661,7 +2884,7 @@ def run_all_pending(gc):
             summary['failed'] += 1
 
     print(
-        f"\n[요약] found={summary['found']}, processed={summary['processed']}, "
+        f"`n[요약] found={summary['found']}, processed={summary['processed']}, "
         f"skipped={summary['skipped']}, failed={summary['failed']}"
     )
     return summary
@@ -2680,3 +2903,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[실행중단] 설정 오류: {e}")
         raise
+
+

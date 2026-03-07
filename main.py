@@ -2033,6 +2033,78 @@ def write_competition_data(ws, competition, company_name):
     apply_competition_sheet_format(ws, len(rows))
 
 # =====================================================
+# DB 저장용 헬퍼
+# =====================================================
+
+def _build_key_metrics(annual_metrics_by_year):
+    """annual_metrics_by_year → JSONB 저장용 dict (최근 3년)"""
+    if not annual_metrics_by_year:
+        return None
+    result = {}
+    for year, m in annual_metrics_by_year[-3:]:
+        result[str(year)] = {
+            'revenue':    m.get('매출액'),
+            'op_income':  m.get('영업이익'),
+            'opm':        m.get('영업이익률'),
+            'roe':        m.get('ROE'),
+            'capex':      m.get('CAPEX'),
+            'net_income': m.get('당기순이익'),
+        }
+    return result
+
+
+def _extract_summary_en(html_content):
+    """EN 아티클 HTML에서 첫 단락 텍스트 추출 (최대 300자)"""
+    if not html_content:
+        return None
+    import re
+    # <p> 태그 안 텍스트 추출
+    paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html_content, re.DOTALL)
+    for p in paragraphs:
+        text = re.sub(r'<[^>]+>', '', p).strip()
+        if len(text) > 50:  # 너무 짧은 단락 skip
+            return text[:300]
+    return None
+
+
+def _generate_investment_rating(company_name, annual_metrics_by_year, investment_points):
+    """영업이익률 추세 + ROE + 투자포인트 기반 Buy/Neutral/Watch GPT 판단"""
+    if not annual_metrics_by_year:
+        return None
+    # 최근 3년 재무 요약
+    fin_lines = []
+    for year, m in annual_metrics_by_year[-3:]:
+        opm = m.get('영업이익률')
+        roe = m.get('ROE')
+        line = f"{year}년"
+        if opm is not None: line += f" OPM {opm*100:.1f}%"
+        if roe is not None: line += f" ROE {roe*100:.1f}%"
+        fin_lines.append(line)
+    ip_text = ' / '.join(
+        (p.get('투자포인트') if isinstance(p, dict) else str(p))
+        for p in investment_points[:3]
+    )
+    prompt = (
+        f"{company_name} 투자 의견을 Buy / Neutral / Watch 중 하나로만 답하라.\n"
+        f"재무: {', '.join(fin_lines)}\n"
+        f"투자포인트: {ip_text}\n"
+        f"규칙: 단어 하나만 출력"
+    )
+    try:
+        resp = openai_client.chat.completions.create(
+            model=OPENAI_MODEL_PRIMARY,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=10,
+        )
+        rating = extract_message_text(resp.choices[0].message).strip()
+        if rating in ('Buy', 'Neutral', 'Watch'):
+            return rating
+        return None
+    except Exception:
+        return None
+
+
+# =====================================================
 # 메인 실행
 # =====================================================
 
@@ -2263,7 +2335,20 @@ def run_analysis(spreadsheet):
         print(f"  ⚠️ 주식분석 산출값 시트 읽기 실패 (무시): {e}")
 
     # ===== Supabase DB 저장 (Sheets 작성 완료) =====
-    _db_post_id = upsert_post(stock_code, company_name, _period_key, sheet_done=True)
+    _sector = None
+    _raw_sector = analysis.get('산업 개요', '')
+    if _raw_sector:
+        _first_line = _raw_sector.strip().splitlines()[0].lstrip('•·-– ').strip()
+        if _first_line:
+            _sector = _first_line[:100]
+    _key_metrics = _build_key_metrics(annual_metrics_by_year)
+
+    _db_post_id = upsert_post(
+        stock_code, company_name, _period_key,
+        sheet_done=True,
+        sector=_sector,
+        key_metrics=_key_metrics,
+    )
     if _db_post_id:
         print(f"  [DB] 저장 완료 (post_id: {_db_post_id[:8]}...)")
 
@@ -2353,7 +2438,7 @@ def run_analysis(spreadsheet):
             print(f"  ✅ WordPress 발행 완료: {post_url}")
             print(f"  포커스 키워드: {article.get('focus_keyword', '-')}")
             print(f"  슬러그: {article.get('slug', '-')}")
-            update_post(_db_post_id, content_ko=article.get('content', ''))
+            update_post(_db_post_id, content_ko=article.get('content', ''), wp_url=post_url)
             log_publish(_db_post_id, 'wp_ko', 'success', url=post_url)
             _send_publish_notification(company_name, article.get('focus_keyword', ''), post_url)
 
@@ -2408,7 +2493,15 @@ def run_analysis(spreadsheet):
             print(f"  ✅ EN WordPress 발행 완료: {en_url}")
             print(f"  EN 포커스 키워드: {en_article.get('focus_keyword', '-')}")
             print(f"  EN 슬러그: {en_article.get('slug', '-')}")
-            update_post(_db_post_id, content_en=en_article.get('content', ''))
+            _summary_en = _extract_summary_en(en_article.get('content', ''))
+            _rating = _generate_investment_rating(company_name, annual_metrics_by_year, investment_points)
+            update_post(
+                _db_post_id,
+                content_en=en_article.get('content', ''),
+                wp_en_url=en_url,
+                summary_en=_summary_en,
+                investment_rating=_rating,
+            )
             log_publish(_db_post_id, 'wp_en', 'success', url=en_url)
         except Exception as e:
             print(f"  ⚠️ EN WordPress 발행 실패 (KO 결과에 영향 없음): {e}")

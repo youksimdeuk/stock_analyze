@@ -38,17 +38,24 @@ def upsert_post(stock_code: str, stock_name: str, period_key: str, **kwargs):
     stock_posts에 upsert.
     반환: post id (str) or None (DB 없거나 실패)
 
-    kwargs 허용 키: content_ko, content_en, sheet_done
+    kwargs 허용 키: content_ko, content_en, content_naver, sheet_done,
+                   wp_url, wp_en_url, sector, key_metrics,
+                   summary_en, investment_rating
     """
     db = get_db()
     if db is None:
         return None
+    _allowed = {
+        "content_ko", "content_en", "content_naver", "sheet_done",
+        "wp_url", "wp_en_url", "sector", "key_metrics",
+        "summary_en", "investment_rating",
+    }
     try:
         data = {
             "stock_code": stock_code,
             "stock_name": stock_name,
             "period_key": period_key,
-            **{k: v for k, v in kwargs.items() if k in ("content_ko", "content_en", "sheet_done")},
+            **{k: v for k, v in kwargs.items() if k in _allowed},
         }
         res = (
             db.table("stock_posts")

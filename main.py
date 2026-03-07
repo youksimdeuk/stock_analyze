@@ -41,6 +41,8 @@ from wp_content_generator import generate_wp_article
 from wp_publisher import publish_post, get_related_posts, CATEGORY_NAME
 from wp_en_content_generator import generate_en_article, load_peer_mapping
 from wp_publisher import publish_post_en
+from db import upsert_post, update_post, log_publish, get_latest_post_by_stock, is_channel_published
+from naver_content_generator import generate_naver_post, save_naver_post
 
 
 def _send_publish_notification(company_name, focus_keyword, post_url):
@@ -78,44 +80,32 @@ ANNUAL_DATA_ROWS = {
 }
 
 # 분기 데이터 섹션별 구조
-QUARTERLY_SECTIONS = [
-    {
-        'header_row': 24,
-        'years': [2020, 2021],
-        'data_rows': {
-            '매출액': 26, '매출원가': 28, '판관비': 30,
-            '영업이익': 32, '당기순이익': 34, '영업이익률': 36,
-            'CAPEX': 38, '자본총계': 40, '영업활동현금흐름': 42, 'ROE': 44
-        }
-    },
-    {
-        'header_row': 47,
-        'years': [2022, 2023],
-        'data_rows': {
-            '매출액': 49, '매출원가': 51, '판관비': 53,
-            '영업이익': 55, '당기순이익': 57, '영업이익률': 59,
-            'CAPEX': 61, '자본총계': 63, '영업활동현금흐름': 65, 'ROE': 67
-        }
-    },
-    {
-        'header_row': 70,
-        'years': [2024, 2025],
-        'data_rows': {
-            '매출액': 72, '매출원가': 74, '판관비': 76,
-            '영업이익': 78, '당기순이익': 80, '영업이익률': 82,
-            'CAPEX': 84, '자본총계': 86, '영업활동현금흐름': 88, 'ROE': 90
-        }
-    },
-    {
-        'header_row': 93,
-        'years': [2026, 2027],
-        'data_rows': {
-            '매출액': 95, '매출원가': 97, '판관비': 99,
-            '영업이익': 101, '당기순이익': 103, '영업이익률': 105,
-            'CAPEX': 107, '자본총계': 109, '영업활동현금흐름': 111, 'ROE': 113
-        }
-    },
-]
+def _build_quarterly_sections(start_year=2020, end_year=2039):
+    """분기 섹션을 동적으로 생성 (시트 레이아웃: header_row=24, 섹션 간격 23행)"""
+    base_header = 24
+    span = 23
+    sections = []
+    for i, yr in enumerate(range(start_year, end_year + 1, 2)):
+        h = base_header + i * span
+        sections.append({
+            'header_row': h,
+            'years': [yr, yr + 1],
+            'data_rows': {
+                '매출액':           h + 2,
+                '매출원가':         h + 4,
+                '판관비':           h + 6,
+                '영업이익':         h + 8,
+                '당기순이익':       h + 10,
+                '영업이익률':       h + 12,
+                'CAPEX':           h + 14,
+                '자본총계':         h + 16,
+                '영업활동현금흐름': h + 18,
+                'ROE':             h + 20,
+            }
+        })
+    return sections
+
+QUARTERLY_SECTIONS = _build_quarterly_sections()
 
 REPRT_CODES = {
     'Q1': '11013',   # 1분기보고서
@@ -956,6 +946,12 @@ STOCK_PRICE_KEYWORDS = [
     '강세', '약세',          # "○○ 강세", "○○ 약세" 시황 기사
     '신고가', '신저가',      # 52주 외 단독 표현
     '거래 급증', '거래급증', # 주식 거래량 관련
+    # 시황 roundup 기사 — 여러 종목 나열형
+    '낙폭', '상승폭', '하락폭',
+    '내림세', '하락세', '상승세',
+    '나란히', '동반 상승', '동반 하락', '동반상승', '동반하락',
+    '올랐다', '내렸다', '올라섰다', '떨어졌다',
+    '수급', '외인', '기관 순매수', '기관 순매도',
 ]
 
 DISCLOSURE_NEWS_KEYWORDS = [
@@ -1062,20 +1058,7 @@ def collect_news_items(company_name, min_count=MIN_NEWS_COUNT):
 
 def _detect_formula_arg_separator(ws):
     """Detect formula argument separator from spreadsheet locale."""
-    try:
-        meta = ws.spreadsheet.fetch_sheet_metadata(params={'fields': 'properties(locale)'})
-        locale = str((meta.get('properties') or {}).get('locale') or '').strip().lower()
-    except Exception:
-        locale = ''
-
-    if not locale:
-        return ';'
-
-    comma_locales = (
-        'en', 'ja', 'zh', 'th', 'id', 'ms', 'vi', 'hi',
-    )
-    if locale.startswith(comma_locales):
-        return ','
+    # 이 프로젝트 시트는 항상 ; 구분자 사용
     return ';'
 
 
@@ -1307,11 +1290,12 @@ def apply_competition_sheet_format(ws, row_count):
     apply_batch_format(ws, requests)
 
 def filter_stock_price_news(news_items):
-    """주가/시세 관련 뉴스 제목 필터링"""
+    """주가/시세·시황 roundup 뉴스 필터링 (제목 + 설명 모두 체크)"""
     filtered = []
     for item in news_items:
         title = clean_html(item.get('title', ''))
-        if any(kw in title for kw in STOCK_PRICE_KEYWORDS):
+        desc  = clean_html(item.get('description', ''))
+        if any(kw in title or kw in desc for kw in STOCK_PRICE_KEYWORDS):
             continue
         filtered.append(item)
     return filtered
@@ -2073,6 +2057,8 @@ def run_analysis(spreadsheet):
         raise RuntimeError("corp_map!A2 종목코드(6자리)가 비어 있습니다.")
 
     print(f"\n분석 대상: {company_name} (종목코드: {stock_code})")
+    _period_key = datetime.now().strftime("%Y-%m")
+    _db_post_id = None
 
     # corp_code 없으면 DART에서 조회
     if not corp_code and stock_code:
@@ -2276,6 +2262,11 @@ def run_analysis(spreadsheet):
     except Exception as e:
         print(f"  ⚠️ 주식분석 산출값 시트 읽기 실패 (무시): {e}")
 
+    # ===== Supabase DB 저장 (Sheets 작성 완료) =====
+    _db_post_id = upsert_post(stock_code, company_name, _period_key, sheet_done=True)
+    if _db_post_id:
+        print(f"  [DB] 저장 완료 (post_id: {_db_post_id[:8]}...)")
+
     # ===== [9/9] WordPress 발행 (선택) =====
     if WP_URL and WP_USERNAME and WP_APP_PASSWORD:
         print(f"\n[9/9] WordPress 발행 중...")
@@ -2311,8 +2302,11 @@ def run_analysis(spreadsheet):
                 existing = ko_analysis.get('기업 상황 (재무 중심)') or ''
                 ko_analysis['기업 상황 (재무 중심)'] = existing + val_note
 
-            # 투자 아이디어를 investment_points 마지막에 추가
-            ko_investment_points = list(investment_points)
+            # 투자 아이디어를 investment_points 마지막에 추가 (문자열 → dict 변환)
+            ko_investment_points = [
+                {'번호': i + 1, '투자포인트': point}
+                for i, point in enumerate(investment_points)
+            ]
             if valuation_data.get('user_idea'):
                 ko_investment_points.append({
                     '번호': len(ko_investment_points) + 1,
@@ -2359,9 +2353,30 @@ def run_analysis(spreadsheet):
             print(f"  ✅ WordPress 발행 완료: {post_url}")
             print(f"  포커스 키워드: {article.get('focus_keyword', '-')}")
             print(f"  슬러그: {article.get('slug', '-')}")
+            update_post(_db_post_id, content_ko=article.get('content', ''))
+            log_publish(_db_post_id, 'wp_ko', 'success', url=post_url)
             _send_publish_notification(company_name, article.get('focus_keyword', ''), post_url)
+
+            # ── 네이버 블로그 요약 포스트 생성 ──────────────────────
+            try:
+                _wp_canonical = f"{WP_URL.rstrip('/')}/{article.get('slug', '').strip('/')}" if article.get('slug') else post_url
+                naver_content = generate_naver_post(
+                    company_name           = company_name,
+                    stock_code             = stock_code,
+                    period_key             = _period_key,
+                    annual_metrics_by_year = annual_metrics_by_year,
+                    analysis               = ko_analysis,
+                    investment_points      = ko_investment_points,
+                    wp_url                 = _wp_canonical,
+                )
+                naver_path = save_naver_post(naver_content, stock_code, _period_key)
+                update_post(_db_post_id, content_naver=naver_content)
+                print(f"  ✅ 네이버 블로그 요약 생성 완료: {naver_path}")
+            except Exception as e:
+                print(f"  ⚠️ 네이버 블로그 요약 생성 실패 (무시): {e}")
         except Exception as e:
             print(f"  ⚠️ KO WordPress 발행 실패 (분석은 정상 완료됨): {e}")
+            log_publish(_db_post_id, 'wp_ko', 'failed', error=str(e))
 
         # ── EN 발행 (KO 결과 무관, 독립 실행) ──────────────────────────────
         try:
@@ -2393,8 +2408,11 @@ def run_analysis(spreadsheet):
             print(f"  ✅ EN WordPress 발행 완료: {en_url}")
             print(f"  EN 포커스 키워드: {en_article.get('focus_keyword', '-')}")
             print(f"  EN 슬러그: {en_article.get('slug', '-')}")
+            update_post(_db_post_id, content_en=en_article.get('content', ''))
+            log_publish(_db_post_id, 'wp_en', 'success', url=en_url)
         except Exception as e:
             print(f"  ⚠️ EN WordPress 발행 실패 (KO 결과에 영향 없음): {e}")
+            log_publish(_db_post_id, 'wp_en', 'failed', error=str(e))
     else:
         print("\n[9/9] WordPress 설정 없음 — 발행 스킵")
 
@@ -2416,6 +2434,36 @@ def is_already_analyzed(spreadsheet):
         return bool(val and val.strip())
     except Exception:
         return False
+
+
+def _needs_wp_rerun(spreadsheet):
+    """
+    시트 분석은 완료됐지만 WP 발행이 안 된 채널이 있는지 확인.
+    WP 설정 없으면 항상 False.
+    DB 있으면 publish_runs 기준, 없으면 corp_map D2(KO 발행일) fallback.
+    """
+    if not (WP_URL and WP_USERNAME and WP_APP_PASSWORD):
+        return False
+    try:
+        ws_cm = find_worksheet(spreadsheet, 'corp_map')
+        corp_data = ws_cm.get('A2:A2')
+        stock_code = str(corp_data[0][0]).strip().zfill(6) if corp_data and corp_data[0] else None
+        if not stock_code:
+            return False
+
+        # DB 기준 체크
+        post = get_latest_post_by_stock(stock_code)
+        if post:
+            ko_ok = is_channel_published(post['id'], 'wp_ko')
+            en_ok = is_channel_published(post['id'], 'wp_en')
+            return not (ko_ok and en_ok)
+
+        # DB에 없으면 corp_map D2(KO 발행일) fallback
+        d2 = ws_cm.acell('D2').value
+        return not bool(d2 and str(d2).strip())
+    except Exception:
+        return False
+
 
 def find_analysis_spreadsheets(gc):
     """'-기업분석'으로 끝나는 구글 스프레드시트 목록 반환"""
@@ -2469,9 +2517,12 @@ def run_all_pending(gc):
             spreadsheet = gc.open_by_key(target_id)
             summary['found'] = 1
             if is_already_analyzed(spreadsheet) and not force_reanalyze:
-                print(f"  [{spreadsheet.title}] 이미 분석됨. 건너뜀. (FORCE_REANALYZE 미지정)")
-                summary['skipped'] += 1
-                return summary
+                if _needs_wp_rerun(spreadsheet):
+                    print(f"  [{spreadsheet.title}] 시트 완료·WP 미발행 채널 있음 → 재발행 진행...")
+                else:
+                    print(f"  [{spreadsheet.title}] 이미 완료됨. 건너뜀. (FORCE_REANALYZE 미지정)")
+                    summary['skipped'] += 1
+                    return summary
             ok = run_analysis(spreadsheet)
             if ok:
                 summary['processed'] += 1
@@ -2500,9 +2551,12 @@ def run_all_pending(gc):
         try:
             spreadsheet = gc.open_by_key(f['id'])
             if is_already_analyzed(spreadsheet) and not force_reanalyze:
-                print(f"  [{f['name']}] 이미 분석됨. 건너뜀. (FORCE_REANALYZE 미지정)")
-                summary['skipped'] += 1
-                continue
+                if _needs_wp_rerun(spreadsheet):
+                    print(f"  [{f['name']}] 시트 완료·WP 미발행 채널 있음 → 재발행 진행...")
+                else:
+                    print(f"  [{f['name']}] 이미 완료됨. 건너뜀. (FORCE_REANALYZE 미지정)")
+                    summary['skipped'] += 1
+                    continue
             print(f"\n  [{f['name']}] 분석 시작!")
             ok = run_analysis(spreadsheet)
             if ok:

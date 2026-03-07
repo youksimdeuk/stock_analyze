@@ -22,6 +22,27 @@ LOG_FILE = 'wp_publish_log.jsonl'
 CATEGORY_NAME    = '기업분석'
 EN_CATEGORY_NAME = 'Global Research'   # WordPress /en/ category for English articles
 
+_KRW_USD_RATE_CACHE = None  # (rate, fetched_at_date)
+
+def _get_krw_usd_rate() -> float:
+    """Return approximate KRW per 1 USD. Fetches from frankfurter.app (free, no key).
+    Caches result for the process lifetime. Falls back to 1,400 on failure."""
+    global _KRW_USD_RATE_CACHE
+    today = datetime.now().strftime('%Y-%m-%d')
+    if _KRW_USD_RATE_CACHE and _KRW_USD_RATE_CACHE[1] == today:
+        return _KRW_USD_RATE_CACHE[0]
+    try:
+        resp = requests.get('https://api.frankfurter.app/latest?from=USD&to=KRW', timeout=5)
+        rate = float(resp.json()['rates']['KRW'])
+        _KRW_USD_RATE_CACHE = (rate, today)
+        print(f'  [환율] USD/KRW = {rate:.0f} (frankfurter.app)')
+        return rate
+    except Exception:
+        fallback = 1400.0
+        _KRW_USD_RATE_CACHE = (fallback, today)
+        print(f'  [환율] 조회 실패 → 고정값 {fallback} 사용')
+        return fallback
+
 # =====================================================
 # 가독성 강화: 중요 키워드 목록 (길이 내림차순 정렬 — 부분문자열 선매칭 방지)
 # =====================================================
@@ -113,39 +134,70 @@ def _fmt_pct(val):
         return '-'
 
 
-def _build_financial_table_html(annual_financials):
-    """연간 재무 데이터 → HTML 테이블"""
+def _fmt_usd_m(val):
+    """원(₩) 단위 값 → USD million 문자열"""
+    if val is None:
+        return '-'
+    try:
+        return f"{float(val) / _get_krw_usd_rate() / 1e6:,.0f}"
+    except (TypeError, ValueError):
+        return '-'
+
+
+def _fmt_q_usd(val_eok):
+    """억원 단위 분기 데이터 → USD million 문자열"""
+    if val_eok is None:
+        return '-'
+    try:
+        return f"{float(val_eok) * 1e8 / _get_krw_usd_rate() / 1e6:,.0f}"
+    except (TypeError, ValueError):
+        return '-'
+
+
+def _build_financial_table_html(annual_financials, lang='ko'):
+    """연간 재무 데이터 → HTML 압축 테이블 (최신 4년, 모바일 최적화)"""
     if not annual_financials:
         return ''
 
-    years = sorted(annual_financials.keys())
+    years = sorted(annual_financials.keys())[-4:]  # 최신 4년만
 
-    rows_def = [
-        ('매출액',           '매출액 (억원)',      _fmt_eok),
-        ('영업이익',         '영업이익 (억원)',    _fmt_eok),
-        ('영업이익률',       '영업이익률',         _fmt_pct),
-        ('당기순이익',       '당기순이익 (억원)',  _fmt_eok),
-        ('영업활동현금흐름', 'OCF (억원)',         _fmt_eok),
-        ('CAPEX',           'CAPEX (억원)',        _fmt_eok),
-        ('ROE',             'ROE',                 _fmt_pct),
-    ]
+    if lang == 'en':
+        rows_def = [
+            ('매출액',           'Revenue',    _fmt_usd_m),
+            ('영업이익',         'Op.Profit',  _fmt_usd_m),
+            ('영업이익률',       'Op.Margin',  _fmt_pct),
+            ('당기순이익',       'Net Income', _fmt_usd_m),
+            ('영업활동현금흐름', 'OCF',        _fmt_usd_m),
+            ('CAPEX',           'CAPEX',       _fmt_usd_m),
+            ('ROE',             'ROE',         _fmt_pct),
+        ]
+        caption_text = '▶ Annual Financials (Unit: USD million, approx.)'
+        item_label   = 'Item'
+        yr_suffix    = ''
+    else:
+        rows_def = [
+            ('매출액',           '매출액',    _fmt_eok),
+            ('영업이익',         '영업이익',  _fmt_eok),
+            ('영업이익률',       '영업이익률', _fmt_pct),
+            ('당기순이익',       '순이익',    _fmt_eok),
+            ('영업활동현금흐름', 'OCF',       _fmt_eok),
+            ('CAPEX',           'CAPEX',      _fmt_eok),
+            ('ROE',             'ROE',        _fmt_pct),
+        ]
+        caption_text = '▶ 연간 재무 실적 요약 (단위: 억원)'
+        item_label   = '구분'
+        yr_suffix    = '년'
 
-    style = (
-        'border-collapse:collapse;width:100%;font-size:14px;margin:20px 0;'
-    )
-    th_style = (
-        'background:#1a3a5c;color:#fff;padding:10px 14px;'
-        'text-align:center;border:1px solid #ddd;white-space:nowrap;'
-    )
-    td_style  = 'padding:9px 14px;text-align:right;border:1px solid #ddd;'
-    td0_style = 'padding:9px 14px;text-align:left;border:1px solid #ddd;font-weight:bold;background:#f5f8fc;'
+    hdr_bg    = '#1a3a5c'
+    style     = 'border-collapse:collapse;width:100%;font-size:12px;margin:20px 0;'
+    th_style  = f'background:{hdr_bg};color:#fff;padding:6px 8px;text-align:center;border:1px solid #ddd;white-space:nowrap;'
+    td_style  = 'padding:6px 8px;text-align:right;border:1px solid #ddd;white-space:nowrap;'
+    td0_style = 'padding:6px 8px;text-align:left;border:1px solid #ddd;font-weight:bold;background:#f5f8fc;white-space:nowrap;'
     tr_even   = 'background:#f9f9f9;'
 
-    # 헤더
-    header_cells = ''.join(f'<th style="{th_style}">{y}년</th>' for y in years)
-    thead = f'<thead><tr><th style="{th_style}">구분</th>{header_cells}</tr></thead>'
+    header_cells = ''.join(f'<th style="{th_style}">{y}{yr_suffix}</th>' for y in years)
+    thead = f'<thead><tr><th style="{th_style}">{item_label}</th>{header_cells}</tr></thead>'
 
-    # 바디
     tbody_rows = []
     for idx, (key, label, fmt_fn) in enumerate(rows_def):
         row_bg = tr_even if idx % 2 == 1 else ''
@@ -161,13 +213,14 @@ def _build_financial_table_html(annual_financials):
         )
     tbody = f'<tbody>{"".join(tbody_rows)}</tbody>'
 
-    caption_style = 'caption-side:top;text-align:left;font-weight:bold;font-size:15px;margin-bottom:8px;color:#1a3a5c;'
-
+    cap_style = f'caption-side:top;text-align:left;font-weight:bold;font-size:14px;margin-bottom:8px;color:{hdr_bg};'
     return (
+        f'<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">'
         f'<table style="{style}">'
-        f'<caption style="{caption_style}">▶ 연간 재무 실적 요약 (단위: 억원)</caption>'
+        f'<caption style="{cap_style}">{caption_text}</caption>'
         f'{thead}{tbody}'
         f'</table>'
+        f'</div>'
     )
 
 
@@ -236,7 +289,7 @@ def _build_health_indicators_html(annual_financials):
     )
 
     return (
-        '<div style="margin:16px 0 24px 0;">'
+        '<div style="margin:16px 0 24px 0;overflow-x:auto;">'
         '<p style="font-weight:700;font-size:13px;color:#374151;margin:0 0 6px 0;">'
         '▶ 재무건전성 지표</p>'
         f'<table style="border-collapse:collapse;font-size:13px;">'
@@ -266,53 +319,83 @@ def _fmt_q(val, is_pct=False):
         return '-'
 
 
-def _build_quarterly_table_html(quarterly_financials):
-    """분기 실적 데이터 → HTML 테이블 (최신순)"""
+def _build_quarterly_table_html(quarterly_financials, lang='ko'):
+    """분기 실적 → HTML 압축 테이블 (최신 6분기, 모바일 최적화)"""
     if not quarterly_financials:
         return ''
 
-    style = 'border-collapse:collapse;width:100%;font-size:14px;margin:20px 0;'
-    th_style = (
-        'background:#2c5f8a;color:#fff;padding:9px 14px;'
-        'text-align:center;border:1px solid #ddd;white-space:nowrap;'
-    )
-    td_style  = 'padding:8px 14px;text-align:right;border:1px solid #ddd;'
-    td0_style = 'padding:8px 14px;text-align:center;border:1px solid #ddd;font-weight:bold;background:#f0f5fa;'
+    items = quarterly_financials[:8]  # 최신 8분기 (차트와 동일)
+
+    if lang == 'en':
+        headers      = ['Quarter', 'Revenue', 'Op.Profit', 'Op.Margin', 'Net Income']
+        caption_text = '▶ Quarterly Financials (Unit: USD million, approx.)'
+    else:
+        headers      = ['분기', '매출액', '영업이익', '영업이익률', '순이익']
+        caption_text = '▶ 최근 분기 실적 (최신순, 단위: 억원)'
+
+    hdr_bg    = '#2c5f8a'
+    style     = 'border-collapse:collapse;width:100%;font-size:12px;margin:20px 0;'
+    th_style  = f'background:{hdr_bg};color:#fff;padding:6px 8px;text-align:center;border:1px solid #ddd;white-space:nowrap;'
+    td_style  = 'padding:6px 8px;text-align:right;border:1px solid #ddd;white-space:nowrap;'
+    td0_style = 'padding:6px 8px;text-align:center;border:1px solid #ddd;font-weight:bold;background:#f0f5fa;white-space:nowrap;'
     tr_even   = 'background:#f9f9f9;'
 
     thead = (
-        f'<thead><tr>'
-        f'<th style="{th_style}">분기</th>'
-        f'<th style="{th_style}">매출액 (억원)</th>'
-        f'<th style="{th_style}">영업이익 (억원)</th>'
-        f'<th style="{th_style}">영업이익률</th>'
-        f'<th style="{th_style}">당기순이익 (억원)</th>'
-        f'</tr></thead>'
+        '<thead><tr>'
+        + ''.join(f'<th style="{th_style}">{h}</th>' for h in headers)
+        + '</tr></thead>'
     )
 
     tbody_rows = []
-    for idx, q in enumerate(quarterly_financials):
+    for idx, q in enumerate(items):
         row_bg = tr_even if idx % 2 == 1 else ''
-        분기 = q.get('분기', '-')
+        분기   = q.get('분기', '-')
+        opm    = _fmt_q(q.get('영업이익률pct'), is_pct=True)
+        if lang == 'en':
+            rev = _fmt_q_usd(q.get('매출액억원'))
+            op  = _fmt_q_usd(q.get('영업이익억원'))
+            ni  = _fmt_q_usd(q.get('당기순이익억원'))
+        else:
+            rev = _fmt_q(q.get('매출액억원'))
+            op  = _fmt_q(q.get('영업이익억원'))
+            ni  = _fmt_q(q.get('당기순이익억원'))
         tbody_rows.append(
             f'<tr style="{row_bg}">'
             f'<td style="{td0_style}">{분기}</td>'
-            f'<td style="{td_style}">{_fmt_q(q.get("매출액억원"))}</td>'
-            f'<td style="{td_style}">{_fmt_q(q.get("영업이익억원"))}</td>'
-            f'<td style="{td_style}">{_fmt_q(q.get("영업이익률pct"), is_pct=True)}</td>'
-            f'<td style="{td_style}">{_fmt_q(q.get("당기순이익억원"))}</td>'
+            f'<td style="{td_style}">{rev}</td>'
+            f'<td style="{td_style}">{op}</td>'
+            f'<td style="{td_style}">{opm}</td>'
+            f'<td style="{td_style}">{ni}</td>'
             f'</tr>'
         )
     tbody = f'<tbody>{"".join(tbody_rows)}</tbody>'
 
-    caption_style = 'caption-side:top;text-align:left;font-weight:bold;font-size:15px;margin-bottom:8px;color:#2c5f8a;'
-
+    cap_style = f'caption-side:top;text-align:left;font-weight:bold;font-size:14px;margin-bottom:8px;color:{hdr_bg};'
     return (
+        f'<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">'
         f'<table style="{style}">'
-        f'<caption style="{caption_style}">▶ 최근 분기 실적 (최신순, 단위: 억원)</caption>'
+        f'<caption style="{cap_style}">{caption_text}</caption>'
         f'{thead}{tbody}'
         f'</table>'
+        f'</div>'
     )
+
+
+# =====================================================
+# 모바일 대응: 감싸지지 않은 <table> 래핑
+# =====================================================
+
+def _wrap_tables_responsive(html):
+    """overflow-x:auto div 로 감싸지지 않은 모든 <table>...</table> 을 래핑 (모바일 가로 스크롤)"""
+    WRAP_OPEN = '<div style="overflow-x:auto;">'
+
+    def _replacer(m):
+        prefix = html[:m.start()].rstrip()
+        if prefix.endswith(WRAP_OPEN):
+            return m.group(0)
+        return f'{WRAP_OPEN}{m.group(0)}</div>'
+
+    return re.sub(r'<table[\s\S]*?</table>', _replacer, html, flags=re.IGNORECASE)
 
 
 # =====================================================
@@ -338,14 +421,21 @@ def _build_svg_chart(annual_financials, company_name='', lang='ko'):
         except (TypeError, ValueError):
             return 0.0
 
+    def to_usd_m(v):
+        try:
+            return float(v) / _get_krw_usd_rate() / 1e6 if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
     def to_pct(v):
         try:
             return float(v) * 100 if v is not None else 0.0
         except (TypeError, ValueError):
             return 0.0
 
-    revenues   = [to_eok(annual_financials[y].get('매출액'))   for y in years]
-    op_profits = [to_eok(annual_financials[y].get('영업이익')) for y in years]
+    to_bar     = to_usd_m if lang == 'en' else to_eok
+    revenues   = [to_bar(annual_financials[y].get('매출액'))   for y in years]
+    op_profits = [to_bar(annual_financials[y].get('영업이익')) for y in years]
     op_margins = [to_pct(annual_financials[y].get('영업이익률')) for y in years]
 
     # 캔버스 설정
@@ -447,11 +537,11 @@ def _build_svg_chart(annual_financials, company_name='', lang='ko'):
 
     # 범례
     if lang == 'en':
-        rev_label   = 'Revenue (KRW100M)'
-        op_label    = 'Op. Profit (KRW100M)'
+        rev_label   = 'Revenue (USD M)'
+        op_label    = 'Op. Profit (USD M)'
         opm_label   = 'Op. Margin (%)'
         alt_text    = f"{company_name} Annual Revenue & Operating Profit Trend" if company_name else "Annual Financial Chart"
-        chart_title = '▶ Revenue & Operating Profit Trend'
+        chart_title = '▶ Revenue & Operating Profit Trend (USD M, approx.)'
     else:
         rev_label   = '매출액(억원)'
         op_label    = '영업이익(억원)'
@@ -510,9 +600,15 @@ def _build_quarterly_svg_chart(quarterly_financials, company_name='', lang='ko')
         except (TypeError, ValueError):
             return 0.0
 
-    labels     = [q.get('분기', '-') for q in items]
-    revenues   = [safe_f(q.get('매출액억원'))   for q in items]
-    op_profits = [safe_f(q.get('영업이익억원')) for q in items]
+    labels = [q.get('분기', '-') for q in items]
+    if lang == 'en':
+        # 억원 → USD M (1억원 = 1e8 KRW, ÷ KRW/USD ÷ 1e6)
+        _rate = _get_krw_usd_rate()
+        revenues   = [safe_f(q.get('매출액억원'))   * 1e8 / _rate / 1e6 for q in items]
+        op_profits = [safe_f(q.get('영업이익억원')) * 1e8 / _rate / 1e6 for q in items]
+    else:
+        revenues   = [safe_f(q.get('매출액억원'))   for q in items]
+        op_profits = [safe_f(q.get('영업이익억원')) for q in items]
     op_margins = [safe_f(q.get('영업이익률pct')) for q in items]  # 이미 %
 
     W, H         = 640, 300
@@ -588,11 +684,11 @@ def _build_quarterly_svg_chart(quarterly_financials, company_name='', lang='ko')
 
     # 범례
     if lang == 'en':
-        rev_label   = 'Revenue (KRW100M)'
-        op_label    = 'Op. Profit (KRW100M)'
+        rev_label   = 'Revenue (USD M)'
+        op_label    = 'Op. Profit (USD M)'
         opm_label   = 'Op. Margin (%)'
         alt_text    = f"{company_name} Quarterly Revenue & Operating Profit Trend" if company_name else "Quarterly Financial Chart"
-        chart_title = '▶ Quarterly Revenue & Operating Profit Trend'
+        chart_title = '▶ Quarterly Revenue & Operating Profit Trend (USD M, approx.)'
     else:
         rev_label   = '매출액(억원)'
         op_label    = '영업이익(억원)'
@@ -1308,6 +1404,9 @@ def publish_post(title, content, company_data, seo_data=None):
     # 목차 앵커 연결 (H2 id 부여 + 목차 li href)
     wp_content = _inject_anchors(wp_content)
 
+    # 모바일 대응: 모든 <table> overflow-x:auto 래핑
+    wp_content = _wrap_tables_responsive(wp_content)
+
     # 가독성 강화: 중요 키워드 굵게 / 밑줄+굵게 처리
     wp_content = _enhance_readability(wp_content)
 
@@ -1372,9 +1471,12 @@ def publish_post(title, content, company_data, seo_data=None):
 def _inject_charts_en(html, annual_financials, company_name, quarterly_financials=None):
     """
     영어 아티클 본문의 <h2>Revenue & Margin Snapshot</h2> 바로 다음에
-    기존 SVG 차트(annual + quarterly)를 주입한다.
+    재무 테이블 + SVG 차트를 주입한다.
     H2를 찾지 못하면 원본 html 그대로 반환 (warn-only).
     """
+    # 환율 1회만 API 호출 → 이후 _fmt_usd_m/_fmt_q_usd 모두 캐시 사용
+    _get_krw_usd_rate()
+
     marker = re.search(
         r'(<h2[^>]*>[^<]*Revenue[^<]*Margin[^<]*Snapshot[^<]*</h2>)',
         html, re.IGNORECASE
@@ -1407,10 +1509,17 @@ def _inject_charts_en(html, annual_financials, company_name, quarterly_financial
             '</div>\n'
         )
 
-    if not chart_block.strip():
+    # 재무 테이블 (EN 라벨, USD 단위)
+    table_block = ''
+    if annual_financials:
+        table_block += _build_financial_table_html(annual_financials, lang='en')
+    if quarterly_financials:
+        table_block += _build_quarterly_table_html(quarterly_financials, lang='en')
+
+    if not chart_block.strip() and not table_block.strip():
         return html
 
-    return html[:insert_pos] + chart_block + html[insert_pos:]
+    return html[:insert_pos] + table_block + chart_block + html[insert_pos:]
 
 
 def publish_post_en(article: dict, company_data: dict) -> str:
@@ -1441,6 +1550,9 @@ def publish_post_en(article: dict, company_data: dict) -> str:
     # TOC 앵커 연결 (기존 함수 재사용)
     content = _inject_anchors(content)
     # _enhance_readability 는 KO 금융 키워드 기반 → EN에는 미적용
+
+    # 모바일 대응: 모든 <table> overflow-x:auto 래핑
+    content = _wrap_tables_responsive(content)
 
     # NinjaFirewall Rule 115 대응: <script> 블록 제거
     content = re.sub(r'<script[^>]*>.*?</script>', '', content,

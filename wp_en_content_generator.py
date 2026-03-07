@@ -17,6 +17,27 @@ from config import OPENAI_API_KEY
 ARTICLE_MODEL  = 'gpt-5-mini'
 QUARTERLY_MAX  = 8
 PEER_MAP_FILE  = os.path.join(os.path.dirname(__file__), 'peer_mapping.json')
+_KRW_USD_RATE_CACHE = None  # (rate, fetched_at_date)
+
+def _get_krw_usd_rate() -> float:
+    """Return KRW per 1 USD. Fetches from frankfurter.app (free, no key).
+    Caches for the process lifetime. Falls back to 1,400 on failure."""
+    global _KRW_USD_RATE_CACHE
+    import requests
+    from datetime import datetime as _dt
+    today = _dt.now().strftime('%Y-%m-%d')
+    if _KRW_USD_RATE_CACHE and _KRW_USD_RATE_CACHE[1] == today:
+        return _KRW_USD_RATE_CACHE[0]
+    try:
+        resp = requests.get('https://api.frankfurter.app/latest?from=USD&to=KRW', timeout=5)
+        rate = float(resp.json()['rates']['KRW'])
+        _KRW_USD_RATE_CACHE = (rate, today)
+        print(f'  [환율] USD/KRW = {rate:.0f}')
+        return rate
+    except Exception:
+        fallback = 1400.0
+        _KRW_USD_RATE_CACHE = (fallback, today)
+        return fallback
 
 _client = None
 
@@ -59,6 +80,22 @@ def _to_100m(val):
         return None
 
 
+def _to_usd_m(val):
+    """Convert raw KRW → USD million (uses live exchange rate). Returns None if unavailable."""
+    try:
+        return round(float(val) / _get_krw_usd_rate() / 1e6, 1) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _eok_to_usd_m(val):
+    """Convert 억원 → USD million (for quarterly data already in 억원)."""
+    try:
+        return round(float(val) * 1e8 / _get_krw_usd_rate() / 1e6, 1) if val is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _to_pct(val):
     try:
         return round(float(val) * 100, 1) if val is not None else None
@@ -75,14 +112,17 @@ def _quarterly_to_list(quarterly_by_year):
     for year in sorted((quarterly_by_year or {}).keys(), reverse=True):
         for q in [4, 3, 2, 1]:
             m = (quarterly_by_year[year] or {}).get(q)
-            if not m:
+            if not m or not any(m.get(k) for k in ['매출액', '영업이익', '당기순이익']):
                 continue
             rows.append({
-                '분기':         f'{year}Q{q}',
-                '매출액억원':    _to_100m(m.get('매출액')),
-                '영업이익억원':  _to_100m(m.get('영업이익')),
-                '영업이익률pct': _to_pct(m.get('영업이익률')),
-                '당기순이익억원': _to_100m(m.get('당기순이익')),
+                '분기':            f'{year}Q{q}',
+                '매출액억원':       _to_100m(m.get('매출액')),
+                '영업이익억원':     _to_100m(m.get('영업이익')),
+                '영업이익률pct':    _to_pct(m.get('영업이익률')),
+                '당기순이익억원':   _to_100m(m.get('당기순이익')),
+                'revenue_usd_m':    _to_usd_m(m.get('매출액')),
+                'op_profit_usd_m':  _to_usd_m(m.get('영업이익')),
+                'net_income_usd_m': _to_usd_m(m.get('당기순이익')),
             })
             if len(rows) >= QUARTERLY_MAX:
                 return rows
@@ -90,20 +130,20 @@ def _quarterly_to_list(quarterly_by_year):
 
 
 def _build_financials_summary(annual_dict: dict) -> str:
-    """Readable summary for GPT (English units: KRW 100M)."""
+    """Readable summary for GPT (English units: USD million, approx. at KRW_USD_RATE)."""
     lines = []
     for year in sorted(annual_dict.keys()):
         m  = annual_dict[year]
-        rev = _to_100m(m.get('매출액'))
-        op  = _to_100m(m.get('영업이익'))
+        rev = _to_usd_m(m.get('매출액'))
+        op  = _to_usd_m(m.get('영업이익'))
         opm = _to_pct(m.get('영업이익률'))
-        ni  = _to_100m(m.get('당기순이익'))
+        ni  = _to_usd_m(m.get('당기순이익'))
         roe = _to_pct(m.get('ROE'))
         parts = [f"{year}:"]
-        if rev  is not None: parts.append(f"Revenue {rev} KRW100M")
-        if op   is not None: parts.append(f"OpProfit {op} KRW100M")
-        if opm  is not None: parts.append(f"OpMargin {opm}%")
-        if ni   is not None: parts.append(f"NetIncome {ni} KRW100M")
+        if rev  is not None: parts.append(f"Revenue {rev} USD M")
+        if op   is not None: parts.append(f"Op.Profit {op} USD M")
+        if opm  is not None: parts.append(f"Op.Margin {opm}%")
+        if ni   is not None: parts.append(f"Net Income {ni} USD M")
         if roe  is not None: parts.append(f"ROE {roe}%")
         lines.append("  " + " | ".join(parts))
     return "\n".join(lines) or "(no annual data)"
@@ -220,7 +260,7 @@ def _build_en_input_json(company_name, stock_code, annual_dict,
         'ticker':             stock_code,
         'date':               today,
         'slug_suffix':        year_month,
-        'unit_note':          'All financial values in KRW 100M (= 1억원). 1 KRW100M ≈ USD 70K at 1400 KRW/USD.',
+        'unit_note':          f'All financial values in USD million (approx. at {_get_krw_usd_rate():.0f} KRW/USD exchange rate). Format numbers as "X.X USD M".',
         'annual_financials':  _build_financials_summary(annual_dict),
         'quarterly_snapshot': quarterly_list[:4],
         'industry_analysis':  _build_industry_en(analysis),
@@ -264,14 +304,14 @@ def _build_en_prompt(input_data: dict) -> str:
    - If no peer data: state "Comparable peer data not currently available for this coverage."
    - If "Analyst Note" is present in current_valuation, weave it into the valuation narrative naturally.
    - Never mention DCF, target price, or buy/sell language.
-7. Units: state clearly "KRW 100M" for revenue-scale numbers; explain the unit once in the article.
+7. Units: all financial values are in USD million (USD M). Format: "596.0 USD M" — do NOT use KRW units in the body text. Explain once that values are approx. at 1,400 KRW/USD.
 8. Key Risks section: bullet format, minimum 3 risks.
 9. What to Watch Next: clear catalyst list.
 10. No keyword stuffing.
 11. Include <!-- related_posts --> comment placeholder after Valuation section.
 
 === REQUIRED HTML STRUCTURE ===
-<h1>{company} (English Name) Stock Analysis [YEAR]: [subtitle with key theme]</h1>
+<h1>{company} (English Name) ({ticker}.KS) Stock Analysis [YEAR]: [subtitle with key theme]</h1>
 <p><strong>Executive Summary:</strong></p>
 <ul>
   <li>[Key finding 1]</li>
@@ -309,7 +349,7 @@ def _build_en_prompt(input_data: dict) -> str:
 === REQUIRED META OUTPUT BLOCKS ===
 After the HTML body, output these blocks EXACTLY:
 
-<SEO_TITLE>[English Name] Stock Analysis [YEAR] | Revenue, Margin & Valuation</SEO_TITLE>
+<SEO_TITLE>[English Name] ({ticker}.KS) Stock Analysis [YEAR] | Revenue, Margin & Valuation | Unvalued Korean Stock</SEO_TITLE>
 <SEO_DESCRIPTION>Under 155 characters. Include: [English Name] + sector + key metric + main risk.</SEO_DESCRIPTION>
 <SLUG>{ticker.lower()}-en-stock-analysis-{slug_sfx}</SLUG>
 <FOCUS_KEYWORD>[English Name] stock analysis</FOCUS_KEYWORD>
@@ -482,7 +522,7 @@ def generate_en_article(
     # Fallbacks
     year = datetime.now().strftime('%Y')
     if not seo_title:
-        seo_title = f'{company_name} Stock Analysis {year} | Korea Equity Research'
+        seo_title = f'{company_name} ({stock_code}.KS) Stock Analysis {year} | Korea Equity Research | Unvalued Korean Stock'
     if not slug:
         slug = f'{stock_code}-en-stock-analysis-{datetime.now().strftime("%Y-%m")}'
     if not focus_keyword:
@@ -493,10 +533,17 @@ def generate_en_article(
             f'revenue trend, margin outlook, and key risks for global investors.'
         )[:155]
 
+    # Extract H1 text to use as post title (preserves AI-determined English name)
+    h1_match = re.search(r'<h1[^>]*>(.*?)</h1>', content, re.DOTALL | re.IGNORECASE)
+    if h1_match:
+        post_title = re.sub(r'<[^>]+>', '', h1_match.group(1)).strip() + ' (Unvalued Korean Stock)'
+    else:
+        post_title = f'{company_name} Stock Analysis {year}: Revenue, Margin & Valuation Outlook (Unvalued Korean Stock)'
+
     print(f'  [EN] slug={slug} | focus_keyword={focus_keyword}')
 
     return {
-        'title':                f'{company_name} Stock Analysis {year}: Revenue, Margin & Valuation Outlook',
+        'title':                post_title,
         'content':              content,
         'seo_title':            seo_title,
         'meta_description':     meta_description,

@@ -30,8 +30,13 @@ INDUSTRY_SECTIONS = [
 
 
 def _to_float(v):
+    s = str(v).strip().replace(',', '')
+    if s in ('', '-'):
+        return None
     try:
-        return float(str(v).replace(',', '')) if str(v).strip() not in ('', '-') else None
+        if s.endswith('%'):
+            return float(s[:-1]) / 100  # "15.45%" → 0.1545
+        return float(s)
     except (ValueError, TypeError):
         return None
 
@@ -74,7 +79,7 @@ def read_quarterly(all_vals):
                             metrics[metric] = val
                     except IndexError:
                         pass
-                if metrics.get('매출액') is not None:
+                if metrics.get('매출액'):  # 0 또는 None은 미발표 분기로 제외
                     qdata[q] = metrics
             if qdata:
                 result[year] = qdata

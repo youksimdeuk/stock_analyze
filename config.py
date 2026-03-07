@@ -16,6 +16,10 @@ WordPress 발행 (선택):
 - WP_URL          예: https://myblog.com
 - WP_USERNAME
 - WP_APP_PASSWORD  Application Password
+
+Supabase (선택 — 없으면 DB 저장 스킵):
+- SUPABASE_URL         예: https://xxxx.supabase.co
+- SUPABASE_KEY         service_role 키
 """
 
 import os
@@ -54,3 +58,7 @@ WP_APP_PASSWORD = _getenv("WP_APP_PASSWORD")
 # Slack:   https://hooks.slack.com/services/...
 # Discord: https://discord.com/api/webhooks/...
 PUBLISH_WEBHOOK_URL = _getenv("PUBLISH_WEBHOOK_URL")
+
+# Supabase (선택 — 없으면 DB 저장 스킵)
+SUPABASE_URL = _getenv("SUPABASE_URL")
+SUPABASE_KEY = _getenv("SUPABASE_KEY")

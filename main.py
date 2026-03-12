@@ -20,6 +20,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import xml.etree.ElementTree as ET
 import requests
+import yfinance as yf
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote_plus
@@ -2021,64 +2022,50 @@ def _fetch_fx_rate(base: str, quote: str = "KRW"):
 
 
 def yahoo_search_symbol(name: str):
-    """Yahoo Finance 검색 API로 기업명 -> 심볼 매핑."""
+    """yfinance Search로 기업명 -> 심볼 매핑."""
     if not name:
         return None
     try:
-        url = f"https://query1.finance.yahoo.com/v1/finance/search?q={quote_plus(name)}"
-        r = requests.get(url, headers=_YAHOO_HEADERS, timeout=10)
-        data = r.json()
-        quotes = data.get('quotes') or []
-        for q in quotes:
-            if q.get('quoteType') != 'EQUITY':
-                continue
-            symbol = q.get('symbol')
-            if symbol:
-                return symbol
+        search = yf.Search(name, max_results=5)
+        for q in (search.quotes or []):
+            if q.get('quoteType') == 'EQUITY':
+                symbol = q.get('symbol')
+                if symbol:
+                    return symbol
     except Exception as e:
         print(f"  [Yahoo검색] {name} 실패: {e}")
     return None
 
 
 def fetch_yahoo_financials(symbol: str, name: str) -> str:
-    """Yahoo Finance income statement에서 최근 3년 매출/영업이익 추출."""
+    """yfinance Ticker로 최근 3년 연간 매출/영업이익 추출."""
     if not symbol:
         return ''
     try:
-        url = (
-            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-            f"?modules=incomeStatementHistory,financialData,price"
-        )
-        r = requests.get(url, headers=_YAHOO_HEADERS, timeout=10)
-        data = r.json()
-        result = (data.get('quoteSummary') or {}).get('result') or []
-        if not result:
+        ticker = yf.Ticker(symbol)
+        fin = ticker.financials  # DataFrame: 행=항목, 열=연도(내림차순)
+        if fin is None or fin.empty:
             return ''
-        r0 = result[0]
-        ish = (r0.get('incomeStatementHistory') or {}).get('incomeStatementHistory') or []
-        if not ish:
-            return ''
-        currency = (
-            (r0.get('incomeStatementHistory') or {}).get('currencyCode')
-            or (r0.get('financialData') or {}).get('currency')
-            or (r0.get('price') or {}).get('currency')
-            or ''
-        )
+        # 통화 확인
+        currency = (ticker.fast_info.currency if hasattr(ticker, 'fast_info') else None) or ''
         fx_rate = _fetch_fx_rate(currency, "KRW") if currency else None
         lines = []
-        for item in ish[:3]:
-            end = (item.get('endDate') or {}).get('raw')
-            year = datetime.fromtimestamp(end).year if end else ''
-            rev = (item.get('totalRevenue') or {}).get('raw')
-            op = (item.get('operatingIncome') or {}).get('raw')
-            if not year:
+        for col in list(fin.columns)[:3]:  # 최근 3년
+            year = col.year if hasattr(col, 'year') else str(col)[:4]
+            rev = fin.loc['Total Revenue', col] if 'Total Revenue' in fin.index else None
+            op = fin.loc['Operating Income', col] if 'Operating Income' in fin.index else None
+            if rev is None and op is None:
                 continue
+            import math
+            if rev is not None and (isinstance(rev, float) and math.isnan(rev)):
+                rev = None
+            if op is not None and (isinstance(op, float) and math.isnan(op)):
+                op = None
             if fx_rate and rev is not None:
                 rev_krw = rev * fx_rate
                 line = f"  {year}: 매출 {_format_krw_eok(rev_krw)}"
                 if op is not None:
-                    op_krw = op * fx_rate
-                    line += f", 영업이익 {_format_krw_eok(op_krw)}"
+                    line += f", 영업이익 {_format_krw_eok(op * fx_rate)}"
                 line += f" (원화환산, 원천 {_format_large_number(rev)} {currency})"
             else:
                 line = f"  {year}: 매출 {_format_large_number(rev)}"

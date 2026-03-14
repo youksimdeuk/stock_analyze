@@ -46,7 +46,7 @@ from db import upsert_post, update_post, log_publish, get_latest_post_by_stock, 
 from naver_content_generator import generate_naver_post, save_naver_post
 
 OPENAI_TIMEOUT = float(os.getenv("OPENAI_TIMEOUT", "120"))
-OPENAI_ATTEMPTS = max(1, int(os.getenv("OPENAI_ATTEMPTS", "2")))
+OPENAI_ATTEMPTS = max(1, int(os.getenv("OPENAI_ATTEMPTS", "4")))
 
 
 def _send_publish_notification(company_name, focus_keyword, post_url):
@@ -1524,9 +1524,15 @@ def call_openai_json(prompt, max_completion_tokens, task_label='OpenAI'):
                     last_err = e
                     msg = str(e)
                     err_type = type(e).__name__
-                    print(f"  [재시도] {task_label} {model} {mode_label} {attempt}/3 실패: {err_type}: {msg}")
+                    print(f"  [재시도] {task_label} {model} {mode_label} {attempt}/{OPENAI_ATTEMPTS} 실패: {err_type}: {msg}")
                     if attempt < OPENAI_ATTEMPTS:
-                        time.sleep(1.0 * attempt)
+                        # 503/529(장애) 또는 429(rate limit)는 더 길게 대기
+                        if '503' in msg or '529' in msg or '429' in msg:
+                            wait = 15.0 * attempt
+                        else:
+                            wait = 2.0 * attempt
+                        print(f"  [재시도] {wait:.0f}초 대기 후 재시도...")
+                        time.sleep(wait)
                         continue
         # primary 모델 실패 시 fallback 모델로 진행
     raise last_err if last_err else RuntimeError(f"{task_label} 호출 실패")
